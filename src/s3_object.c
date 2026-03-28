@@ -752,6 +752,18 @@ s3_status s3_delete_objects(s3_client *c, const char *bucket,
     struct curl_slist *headers = nullptr;
     headers = add_header(headers, "Content-Type", "application/xml");
 
+    /* S3 requires x-amz-checksum or Content-MD5 for DeleteObjects.
+     * We use x-amz-checksum-sha256 since we have SHA-256. */
+    {
+        uint8_t sha[32];
+        s3__sha256(body.data, body.len, sha);
+        char sha_b64[48];
+        s3__base64_encode(sha, 32, sha_b64, sizeof(sha_b64));
+        char chk_hdr[128];
+        snprintf(chk_hdr, sizeof(chk_hdr), "x-amz-checksum-sha256: %s", sha_b64);
+        headers = curl_slist_append(headers, chk_hdr);
+    }
+
     s3_request_params params = {
         .method            = "POST",
         .bucket            = bucket,
@@ -759,7 +771,6 @@ s3_status s3_delete_objects(s3_client *c, const char *bucket,
         .extra_headers     = headers,
         .upload_data       = body.data,
         .upload_len        = body.len,
-        .content_length    = -1,
         .collect_response  = true,
     };
 
