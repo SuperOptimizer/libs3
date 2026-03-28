@@ -806,22 +806,16 @@ s3_status s3_list_multipart_uploads(
     int qlen = snprintf(query, sizeof(query), "uploads");
 
     if (prefix && prefix[0]) {
-        char encoded[2048];
-        s3__uri_encode(prefix, strlen(prefix), encoded, sizeof(encoded), true);
         qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen,
-                         "&prefix=%s", encoded);
+                         "&prefix=%s", prefix);
     }
     if (delimiter && delimiter[0]) {
-        char encoded[64];
-        s3__uri_encode(delimiter, strlen(delimiter), encoded, sizeof(encoded), true);
         qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen,
-                         "&delimiter=%s", encoded);
+                         "&delimiter=%s", delimiter);
     }
     if (key_marker && key_marker[0]) {
-        char encoded[2048];
-        s3__uri_encode(key_marker, strlen(key_marker), encoded, sizeof(encoded), true);
         qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen,
-                         "&key-marker=%s", encoded);
+                         "&key-marker=%s", key_marker);
     }
     if (upload_id_marker && upload_id_marker[0])
         qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen,

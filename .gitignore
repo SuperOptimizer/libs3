@@ -60,3 +60,5 @@ cmake-build-*/
 
 # IDE
 .idea/
+build_cov/
+build_prof/

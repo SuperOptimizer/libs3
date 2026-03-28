@@ -538,17 +538,14 @@ int s3__presign_url(s3_client *c, const char *method,
                    signed_headers_encoded, sizeof(signed_headers_encoded), true);
 
     /* ── Build query string with all X-Amz-* params ── */
+    /* Values are pre-URI-encoded and params are added in sorted order by key,
+     * so the resulting string is already the canonical query string. */
     s3_buf qbuf;
     s3_buf_init(&qbuf);
-
-    /* Build query params — these will be sorted later via build_canonical_query,
-     * but we also need the unsorted form for the final URL.
-     * For simplicity, add them in sorted order by key already. */
 
     char expires_str[32];
     snprintf(expires_str, sizeof(expires_str), "%d", expires);
 
-    /* Collect all query params, then sort */
     s3_buf_append_str(&qbuf, "X-Amz-Algorithm=AWS4-HMAC-SHA256");
     s3_buf_append_str(&qbuf, "&X-Amz-Credential=");
     s3_buf_append_str(&qbuf, credential_encoded);
@@ -574,9 +571,12 @@ int s3__presign_url(s3_client *c, const char *method,
         s3_buf_append_str(&qbuf, extra_query);
     }
 
-    /* Build the canonical query string (sorted) */
+    /* The query params are already URI-encoded and in sorted order by key,
+     * so use the buffer directly as the canonical query string. */
     char canonical_query[URL_BUF_SZ];
-    build_canonical_query(qbuf.data, canonical_query, sizeof(canonical_query));
+    size_t cq_len = qbuf.len < sizeof(canonical_query) - 1 ? qbuf.len : sizeof(canonical_query) - 1;
+    memcpy(canonical_query, qbuf.data, cq_len);
+    canonical_query[cq_len] = '\0';
 
     /* ── Build canonical headers ── */
     char canonical_headers[1024];

@@ -239,6 +239,8 @@ void s3__sha1(const void *data, size_t len, uint8_t hash[20]);
 uint32_t s3__crc32(uint32_t crc, const void *data, size_t len);
 uint32_t s3__crc32c(uint32_t crc, const void *data, size_t len);
 
+void s3__md5(const void *data, size_t len, uint8_t hash[16]);
+
 size_t s3__base64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_size);
 size_t s3__base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_size);
 
