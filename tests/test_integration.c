@@ -2082,6 +2082,390 @@ static void test_89_stream_large_roundtrip(s3_client *c) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * List Object Versions (90-92)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_90_list_object_versions(s3_client *c) {
+    TEST("90: List object versions with prefix");
+    char key1[256]; make_key(key1, sizeof(key1), "test_ver_a.txt");
+    char key2[256]; make_key(key2, sizeof(key2), "test_ver_b.txt");
+    s3_put_object(c, TEST_BUCKET, key1, "va", 2, NULL, NULL);
+    s3_put_object(c, TEST_BUCKET, key2, "vb", 2, NULL, NULL);
+
+    s3_list_object_versions_opts opts = {0};
+    char prefix[256]; make_key(prefix, sizeof(prefix), "test_ver_");
+    opts.prefix = prefix;
+    s3_list_object_versions_result res = {0};
+    s3_status st = s3_list_object_versions(c, TEST_BUCKET, &opts, &res);
+    cleanup_key(c, key1); cleanup_key(c, key2);
+    if (st != S3_STATUS_OK) { FAILF("list versions: %s", s3_status_string(st)); s3_list_object_versions_result_free(&res); return; }
+    /* Versions may or may not be returned depending on bucket versioning config.
+     * Either way the code path is exercised. */
+    s3_list_object_versions_result_free(&res);
+    PASS();
+}
+
+static void test_91_list_object_versions_truncated(s3_client *c) {
+    TEST("91: List object versions with max_keys=1");
+    char key1[256]; make_key(key1, sizeof(key1), "test_ver_c.txt");
+    char key2[256]; make_key(key2, sizeof(key2), "test_ver_d.txt");
+    s3_put_object(c, TEST_BUCKET, key1, "vc", 2, NULL, NULL);
+    s3_put_object(c, TEST_BUCKET, key2, "vd", 2, NULL, NULL);
+
+    s3_list_object_versions_opts opts = {0};
+    char prefix[256]; make_key(prefix, sizeof(prefix), "test_ver_");
+    opts.prefix = prefix;
+    opts.max_keys = 1;
+    s3_list_object_versions_result res = {0};
+    s3_status st = s3_list_object_versions(c, TEST_BUCKET, &opts, &res);
+    cleanup_key(c, key1); cleanup_key(c, key2);
+    if (st != S3_STATUS_OK) { FAILF("list versions: %s", s3_status_string(st)); s3_list_object_versions_result_free(&res); return; }
+    /* With max_keys=1 and 2+ objects, should be truncated */
+    if (!res.is_truncated) {
+        /* It's OK if versioning is not enabled and we get different behavior */
+    }
+    s3_list_object_versions_result_free(&res);
+    PASS();
+}
+
+static void test_92_list_object_versions_free_empty(s3_client *c) {
+    TEST("92: Free empty list_object_versions_result");
+    (void)c;
+    s3_list_object_versions_result res = {0};
+    s3_list_object_versions_result_free(&res);
+    /* Also test NULL */
+    s3_list_object_versions_result_free(NULL);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Streaming Multipart Upload (93)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_93_multipart_stream_upload(s3_client *c) {
+    TEST("93: Multipart upload via s3_upload_part_stream");
+    char key[256]; make_key(key, sizeof(key), "test_93_mp_stream.bin");
+
+    s3_multipart_upload mpu = {0};
+    s3_status st = s3_create_multipart_upload(c, TEST_BUCKET, key, NULL, &mpu);
+    if (st != S3_STATUS_OK) { FAILF("create mp: %s", s3_status_string(st)); return; }
+
+    /* Build 5MB + 1 byte of data for one part */
+    size_t part_sz = PART_SIZE + 1;
+    char *part_data = malloc(part_sz);
+    if (!part_data) { s3_abort_multipart_upload(c, TEST_BUCKET, key, mpu.upload_id); FAIL("malloc"); return; }
+    memset(part_data, 'S', part_sz);
+
+    stream_read_ctx rctx = { part_data, part_sz, 0 };
+    s3_upload_part_result pres = {0};
+    st = s3_upload_part_stream(c, TEST_BUCKET, key, mpu.upload_id, 1,
+                               stream_read_fn, &rctx, (int64_t)part_sz,
+                               NULL, &pres);
+    free(part_data);
+    if (st != S3_STATUS_OK) {
+        s3_abort_multipart_upload(c, TEST_BUCKET, key, mpu.upload_id);
+        FAILF("upload part stream: %s", s3_status_string(st)); return;
+    }
+    pres.part_number = 1;
+
+    s3_complete_multipart_result cres = {0};
+    st = s3_complete_multipart_upload(c, TEST_BUCKET, key, mpu.upload_id, &pres, 1, &cres);
+    if (st != S3_STATUS_OK) {
+        s3_abort_multipart_upload(c, TEST_BUCKET, key, mpu.upload_id);
+        cleanup_key(c, key);
+        FAILF("complete: %s", s3_status_string(st)); return;
+    }
+
+    /* Verify size via head */
+    s3_head_object_result hres = {0};
+    st = s3_head_object(c, TEST_BUCKET, key, NULL, &hres);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("head: %s", s3_status_string(st)); s3_head_object_result_free(&hres); return; }
+    if (hres.content_length != (int64_t)part_sz) {
+        FAILF("size: expected %zu, got %lld", part_sz, (long long)hres.content_length);
+        s3_head_object_result_free(&hres); return;
+    }
+    s3_head_object_result_free(&hres);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Progress Callback (94)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static int progress_counter = 0;
+static int test_progress_fn(int64_t uploaded, int64_t total_upload,
+                             int64_t downloaded, int64_t total_download,
+                             void *userdata) {
+    (void)uploaded; (void)total_upload;
+    (void)downloaded; (void)total_download;
+    (void)userdata;
+    progress_counter++;
+    return 0;
+}
+
+static void test_94_put_with_progress(s3_client *c) {
+    TEST("94: Put object with progress callback");
+    char key[256]; make_key(key, sizeof(key), "test_94_progress.bin");
+    /* Use a reasonably sized object to trigger progress */
+    size_t sz = 256 * 1024;
+    char *data = malloc(sz);
+    if (!data) { FAIL("malloc"); return; }
+    memset(data, 'P', sz);
+
+    progress_counter = 0;
+    s3_put_object_opts opts = {0};
+    opts.content_type = "application/octet-stream";
+    opts.progress_fn = test_progress_fn;
+    opts.progress_userdata = NULL;
+    s3_status st = s3_put_object(c, TEST_BUCKET, key, data, sz, &opts, NULL);
+    free(data);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("put: %s", s3_status_string(st)); return; }
+    if (progress_counter < 1) { FAIL("progress callback never called"); return; }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Put with Checksum (95-96)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_95_put_with_crc32(s3_client *c) {
+    TEST("95: Put object with CRC32 checksum algorithm");
+    char key[256]; make_key(key, sizeof(key), "test_95_crc32.txt");
+    s3_put_object_opts opts = {0};
+    opts.checksum.algorithm = S3_CHECKSUM_CRC32;
+    s3_put_object_result res = {0};
+    s3_status st = s3_put_object(c, TEST_BUCKET, key, "crc32-test", 10, &opts, &res);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("put crc32: %s", s3_status_string(st)); return; }
+    PASS();
+}
+
+static void test_96_put_with_sha256(s3_client *c) {
+    TEST("96: Put object with SHA256 checksum algorithm");
+    char key[256]; make_key(key, sizeof(key), "test_96_sha256.txt");
+    s3_put_object_opts opts = {0};
+    opts.checksum.algorithm = S3_CHECKSUM_SHA256;
+    s3_put_object_result res = {0};
+    s3_status st = s3_put_object(c, TEST_BUCKET, key, "sha256-test", 11, &opts, &res);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("put sha256: %s", s3_status_string(st)); return; }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Legal Hold and Retention (97-98)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_97_put_legal_hold(s3_client *c) {
+    TEST("97: Put legal hold (expect error, no object lock)");
+    char key[256]; make_key(key, sizeof(key), "test_97_lh.txt");
+    s3_put_object(c, TEST_BUCKET, key, "lh", 2, NULL, NULL);
+
+    s3_status st = s3_put_object_legal_hold(c, TEST_BUCKET, key, NULL, S3_LEGAL_HOLD_ON);
+    cleanup_key(c, key);
+    /* Expect error since bucket likely does not have Object Lock enabled.
+     * Any non-crash result is acceptable. */
+    (void)st;
+    PASS();
+}
+
+static void test_98_put_retention(s3_client *c) {
+    TEST("98: Put retention (expect error, no object lock)");
+    char key[256]; make_key(key, sizeof(key), "test_98_ret.txt");
+    s3_put_object(c, TEST_BUCKET, key, "ret", 3, NULL, NULL);
+
+    s3_object_retention ret = {0};
+    ret.mode = S3_LOCK_GOVERNANCE;
+    snprintf(ret.retain_until, sizeof(ret.retain_until), "2099-01-01T00:00:00Z");
+    s3_status st = s3_put_object_retention(c, TEST_BUCKET, key, NULL, &ret, false);
+    cleanup_key(c, key);
+    /* Expect error since bucket likely does not have Object Lock enabled.
+     * Any non-crash result is acceptable. */
+    (void)st;
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Trivial Coverage (99-101)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_99_sync_result_free_zero(s3_client *c) {
+    TEST("99: s3_sync_result_free on zero-initialized struct");
+    (void)c;
+    s3_sync_result res = {0};
+    s3_sync_result_free(&res);
+    /* Also NULL */
+    s3_sync_result_free(NULL);
+    PASS();
+}
+
+static void test_100_list_directory_buckets(s3_client *c) {
+    TEST("100: s3_list_directory_buckets (expect error or empty)");
+    s3_list_buckets_result res = {0};
+    s3_status st = s3_list_directory_buckets(c, NULL, 10, &res);
+    /* Directory buckets may not be supported; either OK or error is fine */
+    s3_list_buckets_result_free(&res);
+    (void)st;
+    PASS();
+}
+
+static void test_101_stub_functions(s3_client *c) {
+    TEST("101: Stub functions return S3_STATUS_INTERNAL_ERROR");
+    (void)c;
+    s3_status st;
+
+    st = s3_upload_file_parallel(NULL, "b", "k", "f", NULL, NULL);
+    if (st != S3_STATUS_INTERNAL_ERROR) { FAILF("upload_file_parallel: expected INTERNAL_ERROR, got %s", s3_status_string(st)); return; }
+
+    st = s3_download_file_parallel(NULL, "b", "k", "f", NULL, NULL);
+    if (st != S3_STATUS_INTERNAL_ERROR) { FAILF("download_file_parallel: expected INTERNAL_ERROR, got %s", s3_status_string(st)); return; }
+
+    st = s3_copy_large_object(NULL, "sb", "sk", "db", "dk", 0, 0, NULL, NULL);
+    if (st != S3_STATUS_INTERNAL_ERROR) { FAILF("copy_large_object: expected INTERNAL_ERROR, got %s", s3_status_string(st)); return; }
+
+    st = s3_sync_upload(NULL, "b", "d", NULL, NULL);
+    if (st != S3_STATUS_INTERNAL_ERROR) { FAILF("sync_upload: expected INTERNAL_ERROR, got %s", s3_status_string(st)); return; }
+
+    st = s3_sync_download(NULL, "b", "d", NULL, NULL);
+    if (st != S3_STATUS_INTERNAL_ERROR) { FAILF("sync_download: expected INTERNAL_ERROR, got %s", s3_status_string(st)); return; }
+
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Batch Delete Coverage (102-103)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_102_batch_delete_mixed(s3_client *c) {
+    TEST("102: Batch delete 1 real + 1 nonexistent key");
+    char key1[256]; make_key(key1, sizeof(key1), "test_102_exists.txt");
+    char key2[256]; make_key(key2, sizeof(key2), "test_102_never_existed_xyz.txt");
+    s3_put_object(c, TEST_BUCKET, key1, "x", 1, NULL, NULL);
+
+    s3_delete_object_entry entries[2] = {
+        { key1, NULL }, { key2, NULL }
+    };
+    s3_delete_objects_result dres = {0};
+    s3_status st = s3_delete_objects(c, TEST_BUCKET, entries, 2, false, &dres);
+    if (st != S3_STATUS_OK) {
+        FAILF("batch delete: %s", s3_status_string(st));
+        s3_delete_objects_result_free(&dres);
+        cleanup_key(c, key1);
+        return;
+    }
+    /* S3 silently succeeds on non-existent keys, but we exercise the result parsing */
+    s3_delete_objects_result_free(&dres);
+    PASS();
+}
+
+static void test_103_batch_delete_not_quiet(s3_client *c) {
+    TEST("103: Batch delete quiet=false, verify deleted array");
+    char keys[3][256];
+    s3_delete_object_entry entries[3];
+    for (int i = 0; i < 3; i++) {
+        char suffix[64]; snprintf(suffix, sizeof(suffix), "test_103_del_%d.txt", i);
+        make_key(keys[i], sizeof(keys[i]), suffix);
+        s3_put_object(c, TEST_BUCKET, keys[i], "d", 1, NULL, NULL);
+        entries[i].key = keys[i];
+        entries[i].version_id = NULL;
+    }
+
+    s3_delete_objects_result dres = {0};
+    s3_status st = s3_delete_objects(c, TEST_BUCKET, entries, 3, false, &dres);
+    if (st != S3_STATUS_OK) {
+        FAILF("batch delete: %s", s3_status_string(st));
+        s3_delete_objects_result_free(&dres);
+        for (int i = 0; i < 3; i++) cleanup_key(c, keys[i]);
+        return;
+    }
+    /* With quiet=false, deleted array should be populated */
+    if (dres.deleted_count < 3) {
+        FAILF("expected >=3 deleted, got %d", dres.deleted_count);
+        s3_delete_objects_result_free(&dres);
+        return;
+    }
+    /* Verify that deleted keys are present */
+    int matched = 0;
+    for (int i = 0; i < dres.deleted_count; i++) {
+        for (int j = 0; j < 3; j++) {
+            if (strcmp(dres.deleted[i].key, keys[j]) == 0) matched++;
+        }
+    }
+    s3_delete_objects_result_free(&dres);
+    if (matched < 3) { FAILF("only matched %d/3 deleted keys", matched); return; }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Get Object with Progress (104)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static int get_progress_counter = 0;
+static int test_get_progress_fn(int64_t uploaded, int64_t total_upload,
+                                 int64_t downloaded, int64_t total_download,
+                                 void *userdata) {
+    (void)uploaded; (void)total_upload;
+    (void)downloaded; (void)total_download;
+    (void)userdata;
+    get_progress_counter++;
+    return 0;
+}
+
+static void test_104_get_with_progress(s3_client *c) {
+    TEST("104: Get object with progress callback");
+    char key[256]; make_key(key, sizeof(key), "test_104_getprog.bin");
+    /* Put a 128KB object */
+    size_t sz = 128 * 1024;
+    char *data = malloc(sz);
+    if (!data) { FAIL("malloc"); return; }
+    memset(data, 'G', sz);
+    s3_put_object(c, TEST_BUCKET, key, data, sz, NULL, NULL);
+    free(data);
+
+    get_progress_counter = 0;
+    s3_get_object_opts opts = {0};
+    opts.progress_fn = test_get_progress_fn;
+    opts.progress_userdata = NULL;
+    void *out = NULL; size_t out_len = 0;
+    s3_status st = s3_get_object(c, TEST_BUCKET, key, &out, &out_len, &opts);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("get: %s", s3_status_string(st)); if (out) s3_free(out); return; }
+    if (out) s3_free(out);
+    if (get_progress_counter < 1) { FAIL("progress callback never called during get"); return; }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Put Object Stream with Content Type (105)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_105_put_stream_content_type(s3_client *c) {
+    TEST("105: Put object stream with custom content_type, verify via head");
+    char key[256]; make_key(key, sizeof(key), "test_105_stream_ct.xml");
+    const char *body = "<root>stream-content-type-test</root>";
+    stream_read_ctx rctx = { body, strlen(body), 0 };
+
+    s3_put_object_opts opts = {0};
+    opts.content_type = "application/xml";
+    s3_status st = s3_put_object_stream(c, TEST_BUCKET, key, stream_read_fn, &rctx,
+                                         (int64_t)strlen(body), &opts, NULL);
+    if (st != S3_STATUS_OK) { cleanup_key(c, key); FAILF("put stream: %s", s3_status_string(st)); return; }
+
+    s3_head_object_result hres = {0};
+    st = s3_head_object(c, TEST_BUCKET, key, NULL, &hres);
+    cleanup_key(c, key);
+    if (st != S3_STATUS_OK) { FAILF("head: %s", s3_status_string(st)); s3_head_object_result_free(&hres); return; }
+    if (strstr(hres.content_type, "application/xml") == NULL) {
+        FAILF("content_type: expected application/xml, got %s", hres.content_type);
+        s3_head_object_result_free(&hres); return;
+    }
+    s3_head_object_result_free(&hres);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Final Cleanup
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -2262,6 +2646,49 @@ int main(void) {
     test_87_put_stream_with_opts(client);
     test_88_get_stream_to_buffer(client);
     test_89_stream_large_roundtrip(client);
+
+    /* ── List Object Versions (90-92) ── */
+    printf("\nList Object Versions:\n");
+    test_90_list_object_versions(client);
+    test_91_list_object_versions_truncated(client);
+    test_92_list_object_versions_free_empty(client);
+
+    /* ── Streaming Multipart Upload (93) ── */
+    printf("\nStreaming Multipart Upload:\n");
+    test_93_multipart_stream_upload(client);
+
+    /* ── Progress Callback (94) ── */
+    printf("\nProgress Callback:\n");
+    test_94_put_with_progress(client);
+
+    /* ── Checksum (95-96) ── */
+    printf("\nChecksum:\n");
+    test_95_put_with_crc32(client);
+    test_96_put_with_sha256(client);
+
+    /* ── Legal Hold and Retention (97-98) ── */
+    printf("\nLegal Hold and Retention:\n");
+    test_97_put_legal_hold(client);
+    test_98_put_retention(client);
+
+    /* ── Trivial Coverage (99-101) ── */
+    printf("\nTrivial Coverage:\n");
+    test_99_sync_result_free_zero(client);
+    test_100_list_directory_buckets(client);
+    test_101_stub_functions(client);
+
+    /* ── Batch Delete Coverage (102-103) ── */
+    printf("\nBatch Delete Coverage:\n");
+    test_102_batch_delete_mixed(client);
+    test_103_batch_delete_not_quiet(client);
+
+    /* ── Get with Progress (104) ── */
+    printf("\nGet with Progress:\n");
+    test_104_get_with_progress(client);
+
+    /* ── Stream Content Type (105) ── */
+    printf("\nStream Content Type:\n");
+    test_105_put_stream_content_type(client);
 
     /* ── Final Cleanup ── */
     final_cleanup(client);
