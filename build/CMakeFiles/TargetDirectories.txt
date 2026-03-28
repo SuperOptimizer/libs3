@@ -1,6 +1,0 @@
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/s3.dir
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/s3_static.dir
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/test_unit.dir
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/test_integration.dir
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/edit_cache.dir
-/home/forrest/CLionProjects/libs3/build/CMakeFiles/rebuild_cache.dir
