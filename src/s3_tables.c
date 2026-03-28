@@ -77,35 +77,6 @@ static bool json_extract_string(const char *json, size_t json_len,
 }
 
 /*
- * Extract a JSON integer value for a given key.
- */
-static bool json_extract_int(const char *json, size_t json_len,
-                             const char *key, int *out)
-{
-    char buf[64];
-    if (!json_extract_string(json, json_len, key, buf, sizeof(buf))) {
-        /* Try numeric (non-quoted) form: "key": 123 */
-        char pattern[512];
-        snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-        const char *end = json + json_len;
-        const char *found = strstr(json, pattern);
-        if (!found || found >= end) return false;
-        const char *after = found + strlen(pattern);
-        while (after < end && (*after == ' ' || *after == '\t')) after++;
-        if (after >= end || *after != ':') return false;
-        after++;
-        while (after < end && (*after == ' ' || *after == '\t')) after++;
-        if (after >= end) return false;
-        *out = (int)strtol(after, nullptr, 10);
-        return true;
-    }
-    *out = (int)strtol(buf, nullptr, 10);
-    return true;
-}
-
-/* json_extract_int used in list operations below */
-
-/*
  * Count occurrences of a JSON object pattern within an array.
  * Counts opening braces '{' at the array level.
  */

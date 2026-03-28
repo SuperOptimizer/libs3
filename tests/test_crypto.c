@@ -1504,6 +1504,1389 @@ static void test_s3_free_null(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — SHA-256 Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sha256_55_byte_boundary(void) {
+    TEST("SHA-256: 55-byte message (padding boundary)");
+    char msg[55];
+    memset(msg, 'a', 55);
+    char hex[65];
+    s3__sha256_hex(msg, 55, hex);
+    /* 55 bytes is the max that fits in one block with padding */
+    assert(strlen(hex) == 64);
+    /* Verify deterministic */
+    char hex2[65];
+    s3__sha256_hex(msg, 55, hex2);
+    ASSERT_EQ_STR(hex, hex2);
+    PASS();
+}
+
+static void test_sha256_56_byte_boundary(void) {
+    TEST("SHA-256: 56-byte message (needs two blocks for padding)");
+    char msg[56];
+    memset(msg, 'a', 56);
+    char hex[65];
+    s3__sha256_hex(msg, 56, hex);
+    assert(strlen(hex) == 64);
+    /* Must differ from 55-byte */
+    char hex55[65];
+    char msg55[55];
+    memset(msg55, 'a', 55);
+    s3__sha256_hex(msg55, 55, hex55);
+    assert(strcmp(hex, hex55) != 0);
+    PASS();
+}
+
+static void test_sha256_large_input(void) {
+    TEST("SHA-256: large input (2000 bytes)");
+    char msg[2000];
+    memset(msg, 'X', 2000);
+    char hex[65];
+    s3__sha256_hex(msg, 2000, hex);
+    assert(strlen(hex) == 64);
+    /* Verify deterministic */
+    char hex2[65];
+    s3__sha256_hex(msg, 2000, hex2);
+    ASSERT_EQ_STR(hex, hex2);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — SHA-1 Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sha1_448bit(void) {
+    TEST("SHA-1: 448-bit message");
+    const char *msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    uint8_t hash[20];
+    s3__sha1(msg, strlen(msg), hash);
+    char hex[41];
+    s3__hex_encode(hash, 20, hex);
+    ASSERT_EQ_STR(hex, "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+    PASS();
+}
+
+static void test_sha1_896bit(void) {
+    TEST("SHA-1: 896-bit message");
+    const char *msg = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    uint8_t hash[20];
+    s3__sha1(msg, strlen(msg), hash);
+    char hex[41];
+    s3__hex_encode(hash, 20, hex);
+    ASSERT_EQ_STR(hex, "a49b2446a02c645bf419f995b67091253a04a259");
+    PASS();
+}
+
+static void test_sha1_incremental(void) {
+    TEST("SHA-1: incremental update");
+    const char *msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    s3_sha1_ctx ctx;
+    s3__sha1_init(&ctx);
+    s3__sha1_update(&ctx, msg, 20);
+    s3__sha1_update(&ctx, msg + 20, strlen(msg) - 20);
+    uint8_t hash[20];
+    s3__sha1_final(&ctx, hash);
+    char hex[41];
+    s3__hex_encode(hash, 20, hex);
+    ASSERT_EQ_STR(hex, "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+    PASS();
+}
+
+static void test_sha1_one_byte_updates(void) {
+    TEST("SHA-1: one byte at a time");
+    const char *msg = "abc";
+    s3_sha1_ctx ctx;
+    s3__sha1_init(&ctx);
+    for (size_t i = 0; i < 3; i++)
+        s3__sha1_update(&ctx, msg + i, 1);
+    uint8_t hash[20];
+    s3__sha1_final(&ctx, hash);
+    char hex[41];
+    s3__hex_encode(hash, 20, hex);
+    ASSERT_EQ_STR(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — HMAC-SHA256 Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_hmac_sha256_empty_data(void) {
+    TEST("HMAC-SHA256: empty data");
+    uint8_t key[20];
+    memset(key, 0x0b, 20);
+    uint8_t out[32];
+    s3__hmac_sha256(key, 20, "", 0, out);
+    /* Just verify it produces 32 bytes and doesn't crash */
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    assert(strlen(hex) == 64);
+    PASS();
+}
+
+static void test_hmac_sha256_64byte_key(void) {
+    TEST("HMAC-SHA256: key exactly 64 bytes (block size)");
+    uint8_t key[64];
+    memset(key, 0xAA, 64);
+    const char *data = "Test data";
+    uint8_t out[32];
+    s3__hmac_sha256(key, 64, data, strlen(data), out);
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    assert(strlen(hex) == 64);
+    /* Verify deterministic */
+    uint8_t out2[32];
+    s3__hmac_sha256(key, 64, data, strlen(data), out2);
+    ASSERT_EQ_MEM(out, out2, 32);
+    PASS();
+}
+
+static void test_hmac_sha256_empty_key(void) {
+    TEST("HMAC-SHA256: empty key (zero-length)");
+    uint8_t out[32];
+    s3__hmac_sha256("", 0, "data", 4, out);
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    assert(strlen(hex) == 64);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — CRC32/CRC32C Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_crc32_single_byte(void) {
+    TEST("CRC32: single byte");
+    uint32_t crc = s3__crc32(0, "A", 1);
+    assert(crc != 0);  /* Should produce non-zero for non-empty input */
+    PASS();
+}
+
+static void test_crc32_all_zeros(void) {
+    TEST("CRC32: all zeros");
+    uint8_t data[16];
+    memset(data, 0, 16);
+    uint32_t crc = s3__crc32(0, data, 16);
+    assert(crc != 0);  /* CRC of all-zero bytes should not be zero */
+    PASS();
+}
+
+static void test_crc32_all_ff(void) {
+    TEST("CRC32: all 0xFF");
+    uint8_t data[16];
+    memset(data, 0xFF, 16);
+    uint32_t crc = s3__crc32(0, data, 16);
+    assert(crc != 0);
+    PASS();
+}
+
+static void test_crc32c_single_byte(void) {
+    TEST("CRC32C: single byte");
+    uint32_t crc = s3__crc32c(0, "A", 1);
+    assert(crc != 0);
+    PASS();
+}
+
+static void test_crc32c_all_zeros(void) {
+    TEST("CRC32C: all zeros");
+    uint8_t data[16];
+    memset(data, 0, 16);
+    uint32_t crc = s3__crc32c(0, data, 16);
+    assert(crc != 0);
+    PASS();
+}
+
+static void test_crc32c_all_ff(void) {
+    TEST("CRC32C: all 0xFF");
+    uint8_t data[16];
+    memset(data, 0xFF, 16);
+    uint32_t crc = s3__crc32c(0, data, 16);
+    assert(crc != 0);
+    PASS();
+}
+
+static void test_crc32c_empty(void) {
+    TEST("CRC32C: empty");
+    uint32_t crc = s3__crc32c(0, "", 0);
+    ASSERT_EQ_INT(crc, 0);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Base64 Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_base64_decode_AAAA(void) {
+    TEST("Base64 decode: AAAA -> 3 zero bytes");
+    uint8_t out[8];
+    size_t len = s3__base64_decode("AAAA", 4, out, sizeof(out));
+    ASSERT_EQ_INT(len, 3);
+    ASSERT_EQ_INT(out[0], 0);
+    ASSERT_EQ_INT(out[1], 0);
+    ASSERT_EQ_INT(out[2], 0);
+    PASS();
+}
+
+static void test_base64_decode_no_padding(void) {
+    TEST("Base64 decode: without padding chars");
+    /* "SGVsbG8" is "Hello" without the trailing = */
+    uint8_t out[32];
+    size_t len = s3__base64_decode("SGVsbG8", 7, out, sizeof(out));
+    /* Decoder may or may not handle missing padding; just verify no crash */
+    (void)len;
+    PASS();
+}
+
+static void test_base64_encode_three_bytes(void) {
+    TEST("Base64 encode: 3 bytes (no padding)");
+    char out[8];
+    s3__base64_encode((const uint8_t *)"abc", 3, out, sizeof(out));
+    ASSERT_EQ_STR(out, "YWJj");
+    PASS();
+}
+
+static void test_base64_roundtrip_one_byte(void) {
+    TEST("Base64 roundtrip: 1 byte");
+    uint8_t data[] = {0x42};
+    char encoded[8];
+    s3__base64_encode(data, 1, encoded, sizeof(encoded));
+    uint8_t decoded[4];
+    size_t len = s3__base64_decode(encoded, strlen(encoded), decoded, sizeof(decoded));
+    ASSERT_EQ_INT(len, 1);
+    ASSERT_EQ_INT(decoded[0], 0x42);
+    PASS();
+}
+
+static void test_base64_roundtrip_two_bytes(void) {
+    TEST("Base64 roundtrip: 2 bytes");
+    uint8_t data[] = {0x42, 0x99};
+    char encoded[8];
+    s3__base64_encode(data, 2, encoded, sizeof(encoded));
+    uint8_t decoded[4];
+    size_t len = s3__base64_decode(encoded, strlen(encoded), decoded, sizeof(decoded));
+    ASSERT_EQ_INT(len, 2);
+    ASSERT_EQ_MEM(decoded, data, 2);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — URI Encoding Individual Chars
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_uri_encode_tilde(void) {
+    TEST("URI encode: tilde preserved");
+    char out[8];
+    s3__uri_encode("~", 1, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, "~");
+    PASS();
+}
+
+static void test_uri_encode_dot(void) {
+    TEST("URI encode: dot preserved");
+    char out[8];
+    s3__uri_encode(".", 1, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, ".");
+    PASS();
+}
+
+static void test_uri_encode_dash(void) {
+    TEST("URI encode: dash preserved");
+    char out[8];
+    s3__uri_encode("-", 1, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, "-");
+    PASS();
+}
+
+static void test_uri_encode_underscore(void) {
+    TEST("URI encode: underscore preserved");
+    char out[8];
+    s3__uri_encode("_", 1, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, "_");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — XML Parser Coverage
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_xml_find_in_parent_child(void) {
+    TEST("XML find_in: parent/child lookup");
+    const char *xml =
+        "<Root><Parent><Child>value</Child></Parent></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find_in(xml, strlen(xml), "Parent", "Child", &val, &vlen);
+    assert(found);
+    char buf[32];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "value");
+    PASS();
+}
+
+static void test_xml_find_in_not_found(void) {
+    TEST("XML find_in: child not in parent");
+    const char *xml = "<Root><Parent><A>1</A></Parent><B>2</B></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find_in(xml, strlen(xml), "Parent", "B", &val, &vlen);
+    assert(!found);
+    PASS();
+}
+
+static void test_xml_each_zero_matches(void) {
+    TEST("XML each: zero matches returns 0");
+    const char *xml = "<Root><A>1</A><B>2</B></Root>";
+    int count = 0;
+    int result = s3__xml_each(xml, strlen(xml), "Missing", xml_each_counter, &count);
+    ASSERT_EQ_INT(result, 0);
+    ASSERT_EQ_INT(count, 0);
+    PASS();
+}
+
+static int xml_each_stop_at_2(const char *e, size_t l, void *u) {
+    (void)e; (void)l;
+    int *count = (int *)u;
+    (*count)++;
+    return (*count >= 2) ? 1 : 0;  /* stop after 2 */
+}
+
+static void test_xml_each_early_stop(void) {
+    TEST("XML each: callback returns non-zero (early stop)");
+    const char *xml =
+        "<R><I>a</I><I>b</I><I>c</I><I>d</I></R>";
+    int count = 0;
+    int result = s3__xml_each(xml, strlen(xml), "I", xml_each_stop_at_2, &count);
+    ASSERT_EQ_INT(result, 2);
+    ASSERT_EQ_INT(count, 2);
+    PASS();
+}
+
+static void test_xml_with_attributes(void) {
+    TEST("XML: tag with attributes");
+    const char *xml = "<Root><Tag attr=\"val\">content</Tag></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find(xml, strlen(xml), "Tag", &val, &vlen);
+    assert(found);
+    char buf[32];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "content");
+    PASS();
+}
+
+static void test_xml_with_namespace(void) {
+    TEST("XML: tag with xmlns namespace prefix");
+    const char *xml =
+        "<s3:Name xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\">value</s3:Name>";
+    const char *val; size_t vlen;
+    /* Our parser matches exact tag names, so "s3:Name" should work */
+    bool found = s3__xml_find(xml, strlen(xml), "s3:Name", &val, &vlen);
+    assert(found);
+    char buf[32];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "value");
+    PASS();
+}
+
+static void test_xml_empty_input(void) {
+    TEST("XML find: empty input");
+    const char *val; size_t vlen;
+    bool found = s3__xml_find("", 0, "Tag", &val, &vlen);
+    assert(!found);
+    found = s3__xml_find(nullptr, 0, "Tag", &val, &vlen);
+    assert(!found);
+    PASS();
+}
+
+static void test_xml_self_closing(void) {
+    TEST("XML: self-closing tag");
+    const char *xml = "<Root><Empty/><Name>val</Name></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find(xml, strlen(xml), "Empty", &val, &vlen);
+    assert(found);
+    ASSERT_EQ_INT(vlen, 0);
+    PASS();
+}
+
+static void test_xml_decode_only_amp(void) {
+    TEST("XML decode: only ampersand");
+    char out[16];
+    s3__xml_decode_entities("&amp;", 5, out, sizeof(out));
+    ASSERT_EQ_STR(out, "&");
+    PASS();
+}
+
+static void test_xml_decode_only_lt(void) {
+    TEST("XML decode: only lt");
+    char out[16];
+    s3__xml_decode_entities("&lt;", 4, out, sizeof(out));
+    ASSERT_EQ_STR(out, "<");
+    PASS();
+}
+
+static void test_xml_decode_adjacent_entities(void) {
+    TEST("XML decode: adjacent entities");
+    char out[32];
+    s3__xml_decode_entities("&amp;&amp;&lt;&gt;", 18, out, sizeof(out));
+    ASSERT_EQ_STR(out, "&&<>");
+    PASS();
+}
+
+static void test_xml_decode_entity_at_end(void) {
+    TEST("XML decode: entity at end of string");
+    char out[32];
+    s3__xml_decode_entities("hello&amp;", 10, out, sizeof(out));
+    ASSERT_EQ_STR(out, "hello&");
+    PASS();
+}
+
+static void test_xml_decode_empty(void) {
+    TEST("XML decode: empty input");
+    char out[16];
+    s3__xml_decode_entities("", 0, out, sizeof(out));
+    ASSERT_EQ_STR(out, "");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — XML Builder Round-Trips
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_xml_build_delete_batch(void) {
+    TEST("XML build+parse: Delete batch");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "Delete");
+    s3__xml_buf_element_bool(&b, "Quiet", true);
+    for (int i = 0; i < 3; i++) {
+        s3__xml_buf_open(&b, "Object");
+        char key[32];
+        snprintf(key, sizeof(key), "file%d.txt", i);
+        s3__xml_buf_element(&b, "Key", key);
+        s3__xml_buf_close(&b, "Object");
+    }
+    s3__xml_buf_close(&b, "Delete");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find(b.data, b.len, "Quiet", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "true");
+
+    int count = 0;
+    s3__xml_each(b.data, b.len, "Object", xml_each_counter, &count);
+    ASSERT_EQ_INT(count, 3);
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_create_bucket_config(void) {
+    TEST("XML build+parse: CreateBucketConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "CreateBucketConfiguration");
+    s3__xml_buf_element(&b, "LocationConstraint", "eu-west-1");
+    s3__xml_buf_close(&b, "CreateBucketConfiguration");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find(b.data, b.len, "LocationConstraint", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "eu-west-1");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_tagging(void) {
+    TEST("XML build+parse: Tagging");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "Tagging");
+    s3__xml_buf_open(&b, "TagSet");
+    s3__xml_buf_open(&b, "Tag");
+    s3__xml_buf_element(&b, "Key", "env");
+    s3__xml_buf_element(&b, "Value", "prod");
+    s3__xml_buf_close(&b, "Tag");
+    s3__xml_buf_close(&b, "TagSet");
+    s3__xml_buf_close(&b, "Tagging");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find_in(b.data, b.len, "Tag", "Key", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "env");
+    assert(s3__xml_find_in(b.data, b.len, "Tag", "Value", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "prod");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_restore_request(void) {
+    TEST("XML build+parse: RestoreRequest");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "RestoreRequest");
+    s3__xml_buf_element_int(&b, "Days", 7);
+    s3__xml_buf_open(&b, "GlacierJobParameters");
+    s3__xml_buf_element(&b, "Tier", "Expedited");
+    s3__xml_buf_close(&b, "GlacierJobParameters");
+    s3__xml_buf_close(&b, "RestoreRequest");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find(b.data, b.len, "Days", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "7");
+    assert(s3__xml_find_in(b.data, b.len, "GlacierJobParameters", "Tier", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "Expedited");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_complete_multipart(void) {
+    TEST("XML build+parse: CompleteMultipartUpload");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "CompleteMultipartUpload");
+    for (int i = 1; i <= 3; i++) {
+        s3__xml_buf_open(&b, "Part");
+        s3__xml_buf_element_int(&b, "PartNumber", i);
+        char etag[32];
+        snprintf(etag, sizeof(etag), "\"etag%d\"", i);
+        s3__xml_buf_element(&b, "ETag", etag);
+        s3__xml_buf_close(&b, "Part");
+    }
+    s3__xml_buf_close(&b, "CompleteMultipartUpload");
+
+    int count = 0;
+    s3__xml_each(b.data, b.len, "Part", xml_each_counter, &count);
+    ASSERT_EQ_INT(count, 3);
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_versioning_config(void) {
+    TEST("XML build+parse: VersioningConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "VersioningConfiguration");
+    s3__xml_buf_element(&b, "Status", "Enabled");
+    s3__xml_buf_close(&b, "VersioningConfiguration");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find(b.data, b.len, "Status", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "Enabled");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_public_access_block(void) {
+    TEST("XML build+parse: PublicAccessBlockConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "PublicAccessBlockConfiguration");
+    s3__xml_buf_element_bool(&b, "BlockPublicAcls", true);
+    s3__xml_buf_element_bool(&b, "IgnorePublicAcls", true);
+    s3__xml_buf_element_bool(&b, "BlockPublicPolicy", true);
+    s3__xml_buf_element_bool(&b, "RestrictPublicBuckets", true);
+    s3__xml_buf_close(&b, "PublicAccessBlockConfiguration");
+
+    const char *val; size_t vlen; char buf[16];
+    assert(s3__xml_find(b.data, b.len, "BlockPublicAcls", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "true");
+    assert(s3__xml_find(b.data, b.len, "RestrictPublicBuckets", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "true");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_lifecycle_config(void) {
+    TEST("XML build+parse: LifecycleConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "LifecycleConfiguration");
+    s3__xml_buf_open(&b, "Rule");
+    s3__xml_buf_element(&b, "ID", "archive-rule");
+    s3__xml_buf_element(&b, "Status", "Enabled");
+    s3__xml_buf_open(&b, "Filter");
+    s3__xml_buf_element(&b, "Prefix", "logs/");
+    s3__xml_buf_close(&b, "Filter");
+    s3__xml_buf_open(&b, "Transition");
+    s3__xml_buf_element_int(&b, "Days", 30);
+    s3__xml_buf_element(&b, "StorageClass", "GLACIER");
+    s3__xml_buf_close(&b, "Transition");
+    s3__xml_buf_open(&b, "Expiration");
+    s3__xml_buf_element_int(&b, "Days", 365);
+    s3__xml_buf_close(&b, "Expiration");
+    s3__xml_buf_close(&b, "Rule");
+    s3__xml_buf_close(&b, "LifecycleConfiguration");
+
+    const char *val; size_t vlen; char buf[64];
+    assert(s3__xml_find_in(b.data, b.len, "Rule", "ID", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "archive-rule");
+    assert(s3__xml_find_in(b.data, b.len, "Transition", "StorageClass", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "GLACIER");
+    assert(s3__xml_find_in(b.data, b.len, "Expiration", "Days", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "365");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_cors_config(void) {
+    TEST("XML build+parse: CORSConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "CORSConfiguration");
+    s3__xml_buf_open(&b, "CORSRule");
+    s3__xml_buf_element(&b, "AllowedOrigin", "*");
+    s3__xml_buf_element(&b, "AllowedMethod", "GET");
+    s3__xml_buf_element(&b, "AllowedMethod", "PUT");
+    s3__xml_buf_element_int(&b, "MaxAgeSeconds", 3600);
+    s3__xml_buf_close(&b, "CORSRule");
+    s3__xml_buf_close(&b, "CORSConfiguration");
+
+    const char *val; size_t vlen; char buf[32];
+    assert(s3__xml_find_in(b.data, b.len, "CORSRule", "AllowedOrigin", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "*");
+    assert(s3__xml_find_in(b.data, b.len, "CORSRule", "MaxAgeSeconds", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "3600");
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_xml_build_notification_config(void) {
+    TEST("XML build+parse: NotificationConfiguration");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "NotificationConfiguration");
+    s3__xml_buf_open(&b, "TopicConfiguration");
+    s3__xml_buf_element(&b, "Id", "notify-1");
+    s3__xml_buf_element(&b, "Topic", "arn:aws:sns:us-east-1:123456789:my-topic");
+    s3__xml_buf_element(&b, "Event", "s3:ObjectCreated:*");
+    s3__xml_buf_close(&b, "TopicConfiguration");
+    s3__xml_buf_close(&b, "NotificationConfiguration");
+
+    const char *val; size_t vlen; char buf[64];
+    assert(s3__xml_find_in(b.data, b.len, "TopicConfiguration", "Id", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "notify-1");
+    s3_buf_free(&b);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Error Mapping: ALL remaining S3 error codes
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_error_map_all_remaining_codes(void) {
+    TEST("Error mapping: all remaining S3 error codes");
+    ASSERT_EQ_INT(s3__map_s3_error_code("AccountProblem"), S3_STATUS_ACCOUNT_PROBLEM);
+    ASSERT_EQ_INT(s3__map_s3_error_code("AllAccessDisabled"), S3_STATUS_ALL_ACCESS_DISABLED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("CredentialsNotSupported"), S3_STATUS_CREDENTIALS_NOT_SUPPORTED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("CrossLocationLoggingProhibited"), S3_STATUS_CROSS_LOCATION_LOGGING_PROHIBITED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("IllegalLocationConstraintException"), S3_STATUS_ILLEGAL_LOCATION_CONSTRAINT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("IllegalVersioningConfigurationException"), S3_STATUS_ILLEGAL_VERSIONING_CONFIGURATION);
+    ASSERT_EQ_INT(s3__map_s3_error_code("IncompleteBody"), S3_STATUS_INCOMPLETE_BODY);
+    ASSERT_EQ_INT(s3__map_s3_error_code("IncorrectNumberOfFilesInPostRequest"), S3_STATUS_INCORRECT_NUMBER_OF_FILES_IN_POST);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InlineDataTooLarge"), S3_STATUS_INLINE_DATA_TOO_LARGE);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidAccessKeyId"), S3_STATUS_INVALID_ACCESS_KEY_ID);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidBucketName"), S3_STATUS_INVALID_BUCKET_NAME);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidBucketState"), S3_STATUS_INVALID_BUCKET_STATE);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidDigest"), S3_STATUS_INVALID_DIGEST);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidEncryptionAlgorithmError"), S3_STATUS_INVALID_ENCRYPTION_ALGORITHM);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidLocationConstraint"), S3_STATUS_INVALID_LOCATION_CONSTRAINT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidObjectState"), S3_STATUS_INVALID_OBJECT_STATE);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidPayer"), S3_STATUS_INVALID_PAYER);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidPolicyDocument"), S3_STATUS_INVALID_POLICY_DOCUMENT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidRequest"), S3_STATUS_INVALID_REQUEST);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidSecurity"), S3_STATUS_INVALID_SECURITY);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidSOAPRequest"), S3_STATUS_INVALID_SOAP_REQUEST);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidStorageClass"), S3_STATUS_INVALID_STORAGE_CLASS);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidTargetBucketForLogging"), S3_STATUS_INVALID_TARGET_BUCKET_FOR_LOGGING);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidToken"), S3_STATUS_INVALID_TOKEN);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidURI"), S3_STATUS_INVALID_URI);
+    ASSERT_EQ_INT(s3__map_s3_error_code("KeyTooLongError"), S3_STATUS_KEY_TOO_LONG);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MalformedACLError"), S3_STATUS_MALFORMED_ACL);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MalformedPOSTRequest"), S3_STATUS_MALFORMED_POST_REQUEST);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MaxMessageLengthExceeded"), S3_STATUS_MAX_MESSAGE_LENGTH_EXCEEDED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MaxPostPreDataLengthExceededError"), S3_STATUS_MAX_POST_PRE_DATA_LENGTH_EXCEEDED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MetadataTooLarge"), S3_STATUS_METADATA_TOO_LARGE);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MissingAttachment"), S3_STATUS_MISSING_ATTACHMENT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MissingContentLength"), S3_STATUS_MISSING_CONTENT_LENGTH);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MissingRequestBodyError"), S3_STATUS_MISSING_REQUEST_BODY);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MissingSecurityElement"), S3_STATUS_MISSING_SECURITY_ELEMENT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MissingSecurityHeader"), S3_STATUS_MISSING_SECURITY_HEADER);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoLoggingStatusForKey"), S3_STATUS_NO_LOGGING_STATUS_FOR_KEY);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchBucketPolicy"), S3_STATUS_NO_SUCH_BUCKET_POLICY);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchCORSConfiguration"), S3_STATUS_NO_SUCH_CORS_CONFIGURATION);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchLifecycleConfiguration"), S3_STATUS_NO_SUCH_LIFECYCLE_CONFIGURATION);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchWebsiteConfiguration"), S3_STATUS_NO_SUCH_WEBSITE_CONFIGURATION);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchTagSet"), S3_STATUS_NO_SUCH_TAG_SET);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchAccessPoint"), S3_STATUS_NO_SUCH_ACCESS_POINT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NotImplemented"), S3_STATUS_NOT_IMPLEMENTED_S3);
+    ASSERT_EQ_INT(s3__map_s3_error_code("NotSignedUp"), S3_STATUS_NOT_SIGNED_UP);
+    ASSERT_EQ_INT(s3__map_s3_error_code("OperationAborted"), S3_STATUS_OPERATION_ABORTED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("PermanentRedirect"), S3_STATUS_PERMANENT_REDIRECT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("Redirect"), S3_STATUS_REDIRECT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("RequestIsNotMultiPartContent"), S3_STATUS_REQUEST_IS_NOT_MULTI_PART_CONTENT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("RequestTimeTooSkewed"), S3_STATUS_REQUEST_TIME_TOO_SKEWED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("RequestTorrentOfBucketError"), S3_STATUS_REQUEST_TORRENT_OF_BUCKET);
+    ASSERT_EQ_INT(s3__map_s3_error_code("ServerSideEncryptionConfigurationNotFoundError"), S3_STATUS_SERVER_SIDE_ENCRYPTION_CONFIG_NOT_FOUND);
+    ASSERT_EQ_INT(s3__map_s3_error_code("ServiceUnavailable"), S3_STATUS_SERVICE_UNAVAILABLE);
+    ASSERT_EQ_INT(s3__map_s3_error_code("TemporaryRedirect"), S3_STATUS_TEMPORARY_REDIRECT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("TokenRefreshRequired"), S3_STATUS_TOKEN_REFRESH_REQUIRED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("TooManyBuckets"), S3_STATUS_TOO_MANY_BUCKETS);
+    ASSERT_EQ_INT(s3__map_s3_error_code("UnexpectedContent"), S3_STATUS_UNEXPECTED_CONTENT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("UnresolvableGrantByEmailAddress"), S3_STATUS_UNRESOLVABLE_GRANT_BY_EMAIL);
+    ASSERT_EQ_INT(s3__map_s3_error_code("UserKeyMustBeSpecified"), S3_STATUS_USER_KEY_MUST_BE_SPECIFIED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidTag"), S3_STATUS_INVALID_TAG);
+    PASS();
+}
+
+static void test_error_map_null(void) {
+    TEST("Error mapping: null code");
+    ASSERT_EQ_INT(s3__map_s3_error_code(nullptr), S3_STATUS_UNKNOWN_ERROR);
+    PASS();
+}
+
+static void test_http_status_map_200(void) {
+    TEST("HTTP status mapping: 200 -> unknown");
+    /* 200 is success, not an error; should map to unknown */
+    ASSERT_EQ_INT(s3__map_http_status(200), S3_STATUS_UNKNOWN_ERROR);
+    PASS();
+}
+
+static void test_http_status_map_301(void) {
+    TEST("HTTP status mapping: 301 -> unknown");
+    ASSERT_EQ_INT(s3__map_http_status(301), S3_STATUS_UNKNOWN_ERROR);
+    PASS();
+}
+
+static void test_http_status_map_307(void) {
+    TEST("HTTP status mapping: 307 -> unknown");
+    ASSERT_EQ_INT(s3__map_http_status(307), S3_STATUS_UNKNOWN_ERROR);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — s3_status_string individual verification
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_status_string_each_value(void) {
+    TEST("Status string: verify each enum individually non-null");
+    const struct { s3_status st; const char *expected; } checks[] = {
+        { S3_STATUS_OK, "OK" },
+        { S3_STATUS_INVALID_ARGUMENT, "Invalid argument" },
+        { S3_STATUS_OUT_OF_MEMORY, "Out of memory" },
+        { S3_STATUS_INTERNAL_ERROR, "Internal error" },
+        { S3_STATUS_CURL_ERROR, "CURL error" },
+        { S3_STATUS_ACCESS_DENIED, "Access denied" },
+        { S3_STATUS_NO_SUCH_KEY, "No such key" },
+        { S3_STATUS_NO_SUCH_BUCKET, "No such bucket" },
+        { S3_STATUS_SLOW_DOWN, "Slow down" },
+        { S3_STATUS_HTTP_NOT_FOUND, "HTTP 404 Not Found" },
+        { S3_STATUS_HTTP_SERVICE_UNAVAILABLE, "HTTP 503 Service Unavailable" },
+        { S3_STATUS_UNKNOWN_ERROR, "Unknown error" },
+    };
+    for (size_t i = 0; i < sizeof(checks)/sizeof(checks[0]); i++) {
+        const char *s = s3_status_string(checks[i].st);
+        assert(s != nullptr);
+        ASSERT_EQ_STR(s, checks[i].expected);
+    }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Client
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static s3_status test_cred_provider(const char **ak, const char **sk,
+                                     const char **token, void *ud) {
+    (void)ud;
+    *ak = "PROVIDER_AK";
+    *sk = "PROVIDER_SK";
+    *token = nullptr;
+    return S3_STATUS_OK;
+}
+
+static void test_client_with_credential_provider(void) {
+    TEST("Client: create with credential_provider (no static creds)");
+    s3_client *c = nullptr;
+    s3_status st = s3_client_create(&c, &(s3_config){
+        .region = "us-east-1",
+        .credential_provider = test_cred_provider,
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+    assert(c != nullptr);
+    assert(c->credential_provider == test_cred_provider);
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_client_multiple_simultaneous(void) {
+    TEST("Client: multiple clients simultaneously");
+    s3_client *c1 = nullptr, *c2 = nullptr, *c3 = nullptr;
+    s3_status st;
+    st = s3_client_create(&c1, &(s3_config){
+        .credentials = { .access_key_id = "AK1", .secret_access_key = "SK1" },
+        .region = "us-east-1",
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+    st = s3_client_create(&c2, &(s3_config){
+        .credentials = { .access_key_id = "AK2", .secret_access_key = "SK2" },
+        .region = "eu-west-1",
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+    st = s3_client_create(&c3, &(s3_config){
+        .credentials = { .access_key_id = "AK3", .secret_access_key = "SK3" },
+        .region = "ap-northeast-1",
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+
+    /* Verify they are independent */
+    ASSERT_EQ_STR(c1->region, "us-east-1");
+    ASSERT_EQ_STR(c2->region, "eu-west-1");
+    ASSERT_EQ_STR(c3->region, "ap-northeast-1");
+
+    s3_client_destroy(c3);
+    s3_client_destroy(c2);
+    s3_client_destroy(c1);
+    PASS();
+}
+
+static void test_client_deep_copy(void) {
+    TEST("Client: deep copy - modify originals after create");
+    char ak[] = "AKIAIOSFODNN7EXAMPLE";
+    char sk[] = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    char region[] = "us-east-1";
+
+    s3_client *c = nullptr;
+    s3_status st = s3_client_create(&c, &(s3_config){
+        .credentials = { .access_key_id = ak, .secret_access_key = sk },
+        .region = region,
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+
+    /* Modify original strings */
+    memset(ak, 'X', strlen(ak));
+    memset(sk, 'Y', strlen(sk));
+    memset(region, 'Z', strlen(region));
+
+    /* Client should still have the original values */
+    ASSERT_EQ_STR(c->access_key_id, "AKIAIOSFODNN7EXAMPLE");
+    ASSERT_EQ_STR(c->secret_access_key, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    ASSERT_EQ_STR(c->region, "us-east-1");
+
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_client_null_out(void) {
+    TEST("Client: null out pointer -> INVALID_ARGUMENT");
+    s3_status st = s3_client_create(nullptr, &(s3_config){
+        .credentials = { .access_key_id = "AK", .secret_access_key = "SK" },
+        .region = "us-east-1",
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_INVALID_ARGUMENT);
+    PASS();
+}
+
+static void test_client_null_config(void) {
+    TEST("Client: null config -> INVALID_ARGUMENT");
+    s3_client *c = nullptr;
+    s3_status st = s3_client_create(&c, nullptr);
+    ASSERT_EQ_INT(st, S3_STATUS_INVALID_ARGUMENT);
+    PASS();
+}
+
+static void test_client_last_error_null(void) {
+    TEST("Client: last_error on null client");
+    const s3_error *err = s3_client_last_error(nullptr);
+    assert(err == nullptr);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Retry
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_retry_delay_with_jitter(void) {
+    TEST("Retry: delay with jitter in expected range");
+    s3_client *c = nullptr;
+    s3_client_create(&c, &(s3_config){
+        .credentials = { .access_key_id = "AK", .secret_access_key = "SK" },
+        .region = "us-east-1",
+        .retry_policy = {
+            .max_retries = 5,
+            .base_delay_ms = 100,
+            .max_delay_ms = 10000,
+            .backoff_multiplier = 2.0,
+            .jitter = true,
+        },
+    });
+
+    /* With jitter, delay should be in [base*mult^attempt*0.5, base*mult^attempt*1.0] */
+    for (int trial = 0; trial < 20; trial++) {
+        int d = s3__retry_delay_ms(c, 0);
+        assert(d >= 50 && d <= 100);  /* 100 * [0.5, 1.0) */
+    }
+    for (int trial = 0; trial < 20; trial++) {
+        int d = s3__retry_delay_ms(c, 1);
+        assert(d >= 100 && d <= 200);  /* 200 * [0.5, 1.0) */
+    }
+
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_retry_all_flags_disabled(void) {
+    TEST("Retry: all flags disabled should not retry");
+    s3_client *c = nullptr;
+    s3_client_create(&c, &(s3_config){
+        .credentials = { .access_key_id = "AK", .secret_access_key = "SK" },
+        .region = "us-east-1",
+        .retry_policy = {
+            .max_retries = 5,
+            .base_delay_ms = 100,
+            .max_delay_ms = 10000,
+            .backoff_multiplier = 2.0,
+            .jitter = false,
+            .retry_on_throttle = false,
+            .retry_on_5xx = false,
+            .retry_on_timeout = false,
+        },
+    });
+
+    /* Should not retry on throttle */
+    assert(s3__should_retry(c, S3_STATUS_SLOW_DOWN, 0) == false);
+    /* Should not retry on 5xx */
+    assert(s3__should_retry(c, S3_STATUS_HTTP_INTERNAL_SERVER_ERROR, 0) == false);
+    assert(s3__should_retry(c, S3_STATUS_HTTP_SERVICE_UNAVAILABLE, 0) == false);
+    /* Should not retry on timeout */
+    assert(s3__should_retry(c, S3_STATUS_TIMEOUT, 0) == false);
+    assert(s3__should_retry(c, S3_STATUS_REQUEST_TIMEOUT, 0) == false);
+    /* CURL_ERROR should still retry (it's unconditional) */
+    assert(s3__should_retry(c, S3_STATUS_CURL_ERROR, 0) == true);
+
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_retry_exact_boundary(void) {
+    TEST("Retry: exact boundary (max_retries - 1 vs max_retries)");
+    s3_client *c = nullptr;
+    s3_client_create(&c, &(s3_config){
+        .credentials = { .access_key_id = "AK", .secret_access_key = "SK" },
+        .region = "us-east-1",
+        .retry_policy = {
+            .max_retries = 3,
+            .base_delay_ms = 100,
+            .max_delay_ms = 10000,
+            .backoff_multiplier = 2.0,
+            .retry_on_5xx = true,
+        },
+    });
+
+    /* attempt == max_retries - 1 (2) should retry */
+    assert(s3__should_retry(c, S3_STATUS_HTTP_SERVICE_UNAVAILABLE, 2) == true);
+    /* attempt == max_retries (3) should NOT retry */
+    assert(s3__should_retry(c, S3_STATUS_HTTP_SERVICE_UNAVAILABLE, 3) == false);
+    /* attempt > max_retries should NOT retry */
+    assert(s3__should_retry(c, S3_STATUS_HTTP_SERVICE_UNAVAILABLE, 4) == false);
+
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_retry_null_client(void) {
+    TEST("Retry: null client returns false/0");
+    assert(s3__should_retry(nullptr, S3_STATUS_SLOW_DOWN, 0) == false);
+    ASSERT_EQ_INT(s3__retry_delay_ms(nullptr, 0), 0);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Utility Functions
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_strdup_null(void) {
+    TEST("s3__strdup: null -> null");
+    char *result = s3__strdup(nullptr);
+    assert(result == nullptr);
+    PASS();
+}
+
+static void test_strdup_empty(void) {
+    TEST("s3__strdup: empty string -> empty string");
+    char *result = s3__strdup("");
+    assert(result != nullptr);
+    ASSERT_EQ_STR(result, "");
+    S3_FREE(result);
+    PASS();
+}
+
+static void test_strdup_normal(void) {
+    TEST("s3__strdup: normal string");
+    char *result = s3__strdup("hello world");
+    assert(result != nullptr);
+    ASSERT_EQ_STR(result, "hello world");
+    S3_FREE(result);
+    PASS();
+}
+
+static void test_strndup_truncation(void) {
+    TEST("s3__strndup: truncation test");
+    char *result = s3__strndup("hello world", 5);
+    assert(result != nullptr);
+    ASSERT_EQ_STR(result, "hello");
+    S3_FREE(result);
+    PASS();
+}
+
+static void test_strndup_no_truncation(void) {
+    TEST("s3__strndup: n > length (no truncation)");
+    char *result = s3__strndup("hi", 100);
+    assert(result != nullptr);
+    ASSERT_EQ_STR(result, "hi");
+    S3_FREE(result);
+    PASS();
+}
+
+static void test_strndup_null(void) {
+    TEST("s3__strndup: null -> null");
+    char *result = s3__strndup(nullptr, 5);
+    assert(result == nullptr);
+    PASS();
+}
+
+static void test_timestamp_strict_format(void) {
+    TEST("Timestamp: strict format verification");
+    char iso[17], date[9];
+    s3__get_timestamp(iso, date);
+    /* All chars in date should be digits */
+    for (int i = 0; i < 8; i++) {
+        assert(date[i] >= '0' && date[i] <= '9');
+    }
+    /* ISO: YYYYMMDDTHHMMSSZ */
+    for (int i = 0; i < 8; i++) {
+        assert(iso[i] >= '0' && iso[i] <= '9');
+    }
+    assert(iso[8] == 'T');
+    for (int i = 9; i < 15; i++) {
+        assert(iso[i] >= '0' && iso[i] <= '9');
+    }
+    assert(iso[15] == 'Z');
+    ASSERT_EQ_INT(strlen(iso), 16);
+    ASSERT_EQ_INT(strlen(date), 8);
+    PASS();
+}
+
+static void test_content_type_case_insensitive(void) {
+    TEST("Content type: case insensitive extensions");
+    ASSERT_EQ_STR(s3_detect_content_type("photo.JPG"), "image/jpeg");
+    ASSERT_EQ_STR(s3_detect_content_type("page.Html"), "text/html");
+    ASSERT_EQ_STR(s3_detect_content_type("data.JSON"), "application/json");
+    ASSERT_EQ_STR(s3_detect_content_type("image.PNG"), "image/png");
+    PASS();
+}
+
+static void test_content_type_path_with_dir(void) {
+    TEST("Content type: path with directory");
+    ASSERT_EQ_STR(s3_detect_content_type("path/to/file.png"), "image/png");
+    ASSERT_EQ_STR(s3_detect_content_type("/var/data/report.pdf"), "application/pdf");
+    PASS();
+}
+
+static void test_content_type_double_extension(void) {
+    TEST("Content type: double extension (.tar.gz)");
+    ASSERT_EQ_STR(s3_detect_content_type("archive.tar.gz"), "application/gzip");
+    /* .tar alone */
+    ASSERT_EQ_STR(s3_detect_content_type("archive.tar"), "application/x-tar");
+    PASS();
+}
+
+static void test_content_type_null(void) {
+    TEST("Content type: null filename");
+    ASSERT_EQ_STR(s3_detect_content_type(nullptr), "application/octet-stream");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — SigV4
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sigv4_empty_region_service(void) {
+    TEST("SigV4: signing key with empty region/service");
+    uint8_t key[32];
+    s3__derive_signing_key("secret", "20240101", "", "", key);
+    /* Just verify no crash and deterministic */
+    uint8_t key2[32];
+    s3__derive_signing_key("secret", "20240101", "", "", key2);
+    ASSERT_EQ_MEM(key, key2, 32);
+    PASS();
+}
+
+static void test_sigv4_deterministic(void) {
+    TEST("SigV4: signing key deterministic (same inputs -> same output)");
+    uint8_t key1[32], key2[32];
+    s3__derive_signing_key("mySecret123", "20250101", "us-west-2", "s3", key1);
+    s3__derive_signing_key("mySecret123", "20250101", "us-west-2", "s3", key2);
+    ASSERT_EQ_MEM(key1, key2, 32);
+    PASS();
+}
+
+static void test_sigv4_different_services(void) {
+    TEST("SigV4: different services produce different keys");
+    uint8_t key_s3[32], key_iam[32];
+    s3__derive_signing_key("secret", "20240101", "us-east-1", "s3", key_s3);
+    s3__derive_signing_key("secret", "20240101", "us-east-1", "iam", key_iam);
+    assert(memcmp(key_s3, key_iam, 32) != 0);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Growable Buffer
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_buf_many_small_appends(void) {
+    TEST("Buffer: 200 small appends");
+    s3_buf b;
+    s3_buf_init(&b);
+    for (int i = 0; i < 200; i++) {
+        s3_buf_append_str(&b, "a");
+    }
+    ASSERT_EQ_INT(b.len, 200);
+    assert(b.cap >= 200);
+    for (int i = 0; i < 200; i++) assert(b.data[i] == 'a');
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_buf_append_empty_string(void) {
+    TEST("Buffer: append empty string");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3_buf_append_str(&b, "hello");
+    s3_buf_append_str(&b, "");
+    s3_buf_append_str(&b, "world");
+    ASSERT_EQ_STR(b.data, "helloworld");
+    ASSERT_EQ_INT(b.len, 10);
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_buf_free_reinit_append(void) {
+    TEST("Buffer: free, re-init, and append again");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3_buf_append_str(&b, "first");
+    ASSERT_EQ_INT(b.len, 5);
+    s3_buf_free(&b);
+    assert(b.data == nullptr);
+    assert(b.len == 0);
+
+    s3_buf_init(&b);
+    s3_buf_append_str(&b, "second");
+    ASSERT_EQ_STR(b.data, "second");
+    ASSERT_EQ_INT(b.len, 6);
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_buf_append_raw(void) {
+    TEST("Buffer: append raw bytes");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3_buf_append(&b, "abc\0def", 7);
+    ASSERT_EQ_INT(b.len, 7);
+    assert(b.data[3] == '\0');
+    assert(b.data[4] == 'd');
+    s3_buf_free(&b);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Free Functions on Zero-Initialized Structs
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_free_head_object_result_zero(void) {
+    TEST("Free: s3_head_object_result on zero-init");
+    s3_head_object_result r;
+    memset(&r, 0, sizeof(r));
+    s3_head_object_result_free(&r);  /* should not crash */
+    PASS();
+}
+
+static void test_free_list_objects_result_zero(void) {
+    TEST("Free: s3_list_objects_result on zero-init");
+    s3_list_objects_result r;
+    memset(&r, 0, sizeof(r));
+    s3_list_objects_result_free(&r);  /* should not crash */
+    PASS();
+}
+
+static void test_free_delete_objects_result_zero(void) {
+    TEST("Free: s3_delete_objects_result on zero-init");
+    s3_delete_objects_result r;
+    memset(&r, 0, sizeof(r));
+    s3_delete_objects_result_free(&r);  /* should not crash */
+    PASS();
+}
+
+static void test_free_tag_set_zero(void) {
+    TEST("Free: s3_tag_set on zero-init");
+    s3_tag_set r;
+    memset(&r, 0, sizeof(r));
+    s3_tag_set_free(&r);  /* should not crash */
+    PASS();
+}
+
+static void test_free_head_object_result_null(void) {
+    TEST("Free: s3_head_object_result_free(null)");
+    s3_head_object_result_free(nullptr);
+    PASS();
+}
+
+static void test_free_list_objects_result_null(void) {
+    TEST("Free: s3_list_objects_result_free(null)");
+    s3_list_objects_result_free(nullptr);
+    PASS();
+}
+
+static void test_free_delete_objects_result_null(void) {
+    TEST("Free: s3_delete_objects_result_free(null)");
+    s3_delete_objects_result_free(nullptr);
+    PASS();
+}
+
+static void test_free_tag_set_null(void) {
+    TEST("Free: s3_tag_set_free(null)");
+    s3_tag_set_free(nullptr);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Hex Encoding Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_hex_encode_empty(void) {
+    TEST("Hex encode: empty input");
+    char hex[4] = "xyz";
+    s3__hex_encode((const uint8_t *)"", 0, hex);
+    ASSERT_EQ_STR(hex, "");
+    PASS();
+}
+
+static void test_hex_decode_empty(void) {
+    TEST("Hex decode: empty input");
+    uint8_t out[4];
+    int len = s3__hex_decode("", 0, out, sizeof(out));
+    ASSERT_EQ_INT(len, 0);
+    PASS();
+}
+
+static void test_hex_encode_single_byte(void) {
+    TEST("Hex encode: single byte");
+    uint8_t data[] = {0xAB};
+    char hex[4];
+    s3__hex_encode(data, 1, hex);
+    ASSERT_EQ_STR(hex, "ab");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NEW TESTS — Storage Class Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sha256_exactly_128_bytes(void) {
+    TEST("SHA-256: exactly 128 bytes (two full blocks)");
+    char msg[128];
+    memset(msg, 'Z', 128);
+    char hex[65];
+    s3__sha256_hex(msg, 128, hex);
+    assert(strlen(hex) == 64);
+    /* Deterministic */
+    char hex2[65];
+    s3__sha256_hex(msg, 128, hex2);
+    ASSERT_EQ_STR(hex, hex2);
+    PASS();
+}
+
+static void test_crc32_deterministic(void) {
+    TEST("CRC32: deterministic (same input -> same output)");
+    uint32_t crc1 = s3__crc32(0, "test data", 9);
+    uint32_t crc2 = s3__crc32(0, "test data", 9);
+    ASSERT_EQ_INT(crc1, crc2);
+    PASS();
+}
+
+static void test_crc32c_deterministic(void) {
+    TEST("CRC32C: deterministic (same input -> same output)");
+    uint32_t crc1 = s3__crc32c(0, "test data", 9);
+    uint32_t crc2 = s3__crc32c(0, "test data", 9);
+    ASSERT_EQ_INT(crc1, crc2);
+    PASS();
+}
+
+static void test_crc32_vs_crc32c_differ(void) {
+    TEST("CRC32 vs CRC32C: produce different values");
+    uint32_t crc = s3__crc32(0, "test", 4);
+    uint32_t crc_c = s3__crc32c(0, "test", 4);
+    assert(crc != crc_c);
+    PASS();
+}
+
+static void test_xml_find_in_null_inputs(void) {
+    TEST("XML find_in: null inputs return false");
+    const char *val; size_t vlen;
+    assert(!s3__xml_find_in(nullptr, 0, "P", "C", &val, &vlen));
+    assert(!s3__xml_find_in("<R/>", 4, nullptr, "C", &val, &vlen));
+    assert(!s3__xml_find_in("<R/>", 4, "R", nullptr, &val, &vlen));
+    PASS();
+}
+
+static void test_xml_each_null_inputs(void) {
+    TEST("XML each: null inputs return 0");
+    ASSERT_EQ_INT(s3__xml_each(nullptr, 0, "Tag", xml_each_counter, nullptr), 0);
+    ASSERT_EQ_INT(s3__xml_each("<R/>", 4, nullptr, xml_each_counter, nullptr), 0);
+    ASSERT_EQ_INT(s3__xml_each("<R/>", 4, "R", nullptr, nullptr), 0);
+    PASS();
+}
+
+static void test_xml_find_null_tag(void) {
+    TEST("XML find: null tag returns false");
+    const char *val; size_t vlen;
+    assert(!s3__xml_find("<R/>", 4, nullptr, &val, &vlen));
+    PASS();
+}
+
+static void test_storage_class_from_string_null(void) {
+    TEST("Storage class from string: null -> STANDARD");
+    ASSERT_EQ_INT(s3__storage_class_from_string(nullptr), S3_STORAGE_CLASS_STANDARD);
+    PASS();
+}
+
+static void test_storage_class_from_string_unknown(void) {
+    TEST("Storage class from string: unknown -> STANDARD");
+    ASSERT_EQ_INT(s3__storage_class_from_string("UNKNOWN_CLASS"), S3_STORAGE_CLASS_STANDARD);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Main
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1665,6 +3048,147 @@ int main(void) {
     printf("── Memory ──\n");
     test_s3_free();
     test_s3_free_null();
+
+    printf("\n── SHA-256 Edge Cases ──\n");
+    test_sha256_55_byte_boundary();
+    test_sha256_56_byte_boundary();
+    test_sha256_large_input();
+
+    printf("── SHA-1 Extended ──\n");
+    test_sha1_448bit();
+    test_sha1_896bit();
+    test_sha1_incremental();
+    test_sha1_one_byte_updates();
+
+    printf("── HMAC-SHA256 Edge Cases ──\n");
+    test_hmac_sha256_empty_data();
+    test_hmac_sha256_64byte_key();
+    test_hmac_sha256_empty_key();
+
+    printf("── CRC32/CRC32C Edge Cases ──\n");
+    test_crc32_single_byte();
+    test_crc32_all_zeros();
+    test_crc32_all_ff();
+    test_crc32c_single_byte();
+    test_crc32c_all_zeros();
+    test_crc32c_all_ff();
+    test_crc32c_empty();
+
+    printf("── Base64 Edge Cases ──\n");
+    test_base64_decode_AAAA();
+    test_base64_decode_no_padding();
+    test_base64_encode_three_bytes();
+    test_base64_roundtrip_one_byte();
+    test_base64_roundtrip_two_bytes();
+
+    printf("── URI Encoding Individual Chars ──\n");
+    test_uri_encode_tilde();
+    test_uri_encode_dot();
+    test_uri_encode_dash();
+    test_uri_encode_underscore();
+
+    printf("── XML Parser Coverage ──\n");
+    test_xml_find_in_parent_child();
+    test_xml_find_in_not_found();
+    test_xml_each_zero_matches();
+    test_xml_each_early_stop();
+    test_xml_with_attributes();
+    test_xml_with_namespace();
+    test_xml_empty_input();
+    test_xml_self_closing();
+    test_xml_decode_only_amp();
+    test_xml_decode_only_lt();
+    test_xml_decode_adjacent_entities();
+    test_xml_decode_entity_at_end();
+    test_xml_decode_empty();
+
+    printf("── XML Builder Round-Trips ──\n");
+    test_xml_build_delete_batch();
+    test_xml_build_create_bucket_config();
+    test_xml_build_tagging();
+    test_xml_build_restore_request();
+    test_xml_build_complete_multipart();
+    test_xml_build_versioning_config();
+    test_xml_build_public_access_block();
+    test_xml_build_lifecycle_config();
+    test_xml_build_cors_config();
+    test_xml_build_notification_config();
+
+    printf("── Error Mapping Complete ──\n");
+    test_error_map_all_remaining_codes();
+    test_error_map_null();
+    test_http_status_map_200();
+    test_http_status_map_301();
+    test_http_status_map_307();
+
+    printf("── Status String Each ──\n");
+    test_status_string_each_value();
+
+    printf("── Client Extended ──\n");
+    test_client_with_credential_provider();
+    test_client_multiple_simultaneous();
+    test_client_deep_copy();
+    test_client_null_out();
+    test_client_null_config();
+    test_client_last_error_null();
+
+    printf("── Retry Extended ──\n");
+    test_retry_delay_with_jitter();
+    test_retry_all_flags_disabled();
+    test_retry_exact_boundary();
+    test_retry_null_client();
+
+    printf("── Utility Functions ──\n");
+    test_strdup_null();
+    test_strdup_empty();
+    test_strdup_normal();
+    test_strndup_truncation();
+    test_strndup_no_truncation();
+    test_strndup_null();
+    test_timestamp_strict_format();
+    test_content_type_case_insensitive();
+    test_content_type_path_with_dir();
+    test_content_type_double_extension();
+    test_content_type_null();
+
+    printf("── SigV4 Extended ──\n");
+    test_sigv4_empty_region_service();
+    test_sigv4_deterministic();
+    test_sigv4_different_services();
+
+    printf("── Buffer Extended ──\n");
+    test_buf_many_small_appends();
+    test_buf_append_empty_string();
+    test_buf_free_reinit_append();
+    test_buf_append_raw();
+
+    printf("── Free Functions ──\n");
+    test_free_head_object_result_zero();
+    test_free_list_objects_result_zero();
+    test_free_delete_objects_result_zero();
+    test_free_tag_set_zero();
+    test_free_head_object_result_null();
+    test_free_list_objects_result_null();
+    test_free_delete_objects_result_null();
+    test_free_tag_set_null();
+
+    printf("── Hex Edge Cases ──\n");
+    test_hex_encode_empty();
+    test_hex_decode_empty();
+    test_hex_encode_single_byte();
+
+    printf("── Additional Edge Cases ──\n");
+    test_sha256_exactly_128_bytes();
+    test_crc32_deterministic();
+    test_crc32c_deterministic();
+    test_crc32_vs_crc32c_differ();
+    test_xml_find_in_null_inputs();
+    test_xml_each_null_inputs();
+    test_xml_find_null_tag();
+
+    printf("── Storage Class Edge Cases ──\n");
+    test_storage_class_from_string_null();
+    test_storage_class_from_string_unknown();
 
     printf("\n═══════════════════════════════════════\n");
     printf("Results: %d/%d tests passed\n", tests_passed, tests_run);

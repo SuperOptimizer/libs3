@@ -233,21 +233,6 @@ static size_t build_canonical_uri(const char *uri, char *out, size_t out_size) {
     return s3__uri_encode_path(uri, strlen(uri), out, out_size);
 }
 
-/*
- * Extract the host (and port if present) from a full URL.
- * e.g. "https://mybucket.s3.us-east-1.amazonaws.com:443/key" -> "mybucket.s3.us-east-1.amazonaws.com:443"
- */
-static void extract_host_from_url(const char *url, char *host, size_t host_size) {
-    const char *p = strstr(url, "://");
-    if (p) p += 3; else p = url;
-
-    const char *end = strchr(p, '/');
-    size_t len = end ? (size_t)(end - p) : strlen(p);
-    if (len >= host_size) len = host_size - 1;
-    memcpy(host, p, len);
-    host[len] = '\0';
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * s3__derive_signing_key
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -461,7 +446,7 @@ int s3__sign_request(s3_client *c, const char *method,
     S3_LOG_TRACE_(c, "Signature: %s", signature);
 
     /* ── Step (j): Build Authorization header ── */
-    char auth_header[2048];
+    char auth_header[16384];
     snprintf(auth_header, sizeof(auth_header),
              "Authorization: AWS4-HMAC-SHA256 "
              "Credential=%s/%s, "

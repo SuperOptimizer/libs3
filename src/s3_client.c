@@ -259,11 +259,15 @@ void s3__get_timestamp(char iso8601[17], char datestamp[9]) {
     gmtime_r(&now, &tm);
 
     /* ISO 8601: YYYYMMDD'T'HHMMSS'Z' — 16 chars + null */
-    snprintf(iso8601, 17, "%04d%02d%02dT%02d%02d%02dZ",
-             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-             tm.tm_hour, tm.tm_min, tm.tm_sec);
+    char iso_buf[64];
+    snprintf(iso_buf, sizeof(iso_buf), "%04d%02d%02dT%02d%02d%02dZ",
+             (int)(tm.tm_year + 1900), (int)(tm.tm_mon + 1), (int)tm.tm_mday,
+             (int)tm.tm_hour, (int)tm.tm_min, (int)tm.tm_sec);
+    memcpy(iso8601, iso_buf, 17);
 
     /* Datestamp: YYYYMMDD — 8 chars + null */
-    snprintf(datestamp, 9, "%04d%02d%02d",
-             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    char date_buf[64];
+    snprintf(date_buf, sizeof(date_buf), "%04d%02d%02d",
+             (int)(tm.tm_year + 1900), (int)(tm.tm_mon + 1), (int)tm.tm_mday);
+    memcpy(datestamp, date_buf, 9);
 }

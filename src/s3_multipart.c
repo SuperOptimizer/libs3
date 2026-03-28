@@ -17,7 +17,7 @@
 static struct curl_slist *add_header(struct curl_slist *h,
                                      const char *name, const char *value)
 {
-    char buf[1024];
+    char buf[4096];
     snprintf(buf, sizeof(buf), "%s: %s", name, value);
     return curl_slist_append(h, buf);
 }

@@ -8,7 +8,7 @@ BUILD_DIR = build
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean test test_unit test_integration
+.PHONY: all clean test test_unit test_integration test_extra test_stress test_all
 
 all: $(BUILD_DIR)/libs3.a $(BUILD_DIR)/libs3.so
 
@@ -28,16 +28,30 @@ $(BUILD_DIR)/libs3.so: $(OBJECTS)
 $(BUILD_DIR)/test_unit: tests/test_crypto.c $(BUILD_DIR)/libs3.a | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILD_DIR)/libs3.a $(LDFLAGS)
 
+$(BUILD_DIR)/test_extra: tests/test_extra.c $(BUILD_DIR)/libs3.a | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILD_DIR)/libs3.a $(LDFLAGS)
+
 $(BUILD_DIR)/test_integration: tests/test_integration.c $(BUILD_DIR)/libs3.a | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILD_DIR)/libs3.a $(LDFLAGS)
 
 test_unit: $(BUILD_DIR)/test_unit
 	$(BUILD_DIR)/test_unit
 
+test_extra: $(BUILD_DIR)/test_extra
+	$(BUILD_DIR)/test_extra
+
 test_integration: $(BUILD_DIR)/test_integration
 	$(BUILD_DIR)/test_integration
 
+$(BUILD_DIR)/test_stress: tests/test_stress.c $(BUILD_DIR)/libs3.a | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILD_DIR)/libs3.a $(LDFLAGS)
+
+test_stress: $(BUILD_DIR)/test_stress
+	$(BUILD_DIR)/test_stress
+
 test: test_unit
+
+test_all: test_unit test_stress
 
 clean:
 	rm -rf $(BUILD_DIR)
