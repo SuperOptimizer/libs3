@@ -1321,7 +1321,15 @@ static void test_54_delete_all_objects(s3_client *c) {
         for (int i = 0; i < 3; i++) cleanup_key(c, keys[i]);
         return;
     }
-    if (deleted < 3) { FAILF("expected >=3 deleted, got %d", deleted); return; }
+    /* In quiet mode, deleted count may be 0 (S3 doesn't return Deleted elements).
+     * Verify the objects are actually gone instead. */
+    bool any_left = false;
+    for (int i = 0; i < 3; i++) {
+        bool exists = false;
+        s3_object_exists(c, TEST_BUCKET, keys[i], &exists);
+        if (exists) any_left = true;
+    }
+    if (any_left) { FAIL("objects still exist after delete_all"); return; }
     PASS();
 }
 

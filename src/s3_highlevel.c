@@ -412,10 +412,10 @@ s3_status s3_delete_all_objects(s3_client *c, const char *bucket, const char *pr
 
         status = s3_delete_objects(c, bucket, entries, batch_size, true, &del_result);
 
-        if (del_result.deleted) {
-            total_deleted += del_result.deleted_count;
+        /* quiet=true: S3 only returns errors. Count successes as batch - errors. */
+            total_deleted += batch_size - del_result.error_count;
             S3_FREE(del_result.deleted);
-        }
+        /* end quiet fix */
         S3_FREE(del_result.errors);
 
         if (status != S3_STATUS_OK) {

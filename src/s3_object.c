@@ -759,7 +759,6 @@ s3_status s3_delete_objects(s3_client *c, const char *bucket,
         char md5_b64[32];
         s3__base64_encode(md5, 16, md5_b64, sizeof(md5_b64));
         headers = add_header(headers, "Content-MD5", md5_b64);
-        fprintf(stderr, "[DEBUG] Content-MD5: %s (body_len=%zu)\n", md5_b64, body.len);
     }
 
     s3_request_params params = {
