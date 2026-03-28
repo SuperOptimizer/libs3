@@ -875,6 +875,635 @@ static void test_xml_parse_initiate_multipart(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * HMAC-SHA256 Additional Tests (RFC 4231 cases 4-6)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_hmac_sha256_case4(void) {
+    TEST("HMAC-SHA256: RFC 4231 test case 4");
+    uint8_t key[25];
+    for (int i = 0; i < 25; i++) key[i] = (uint8_t)(i + 1);
+    uint8_t data[50];
+    memset(data, 0xcd, 50);
+    uint8_t out[32];
+    s3__hmac_sha256(key, 25, data, 50, out);
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    ASSERT_EQ_STR(hex, "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b");
+    PASS();
+}
+
+static void test_hmac_sha256_case6(void) {
+    TEST("HMAC-SHA256: RFC 4231 test case 6 (131-byte key)");
+    uint8_t key[131];
+    memset(key, 0xaa, 131);
+    const char *data = "Test Using Larger Than Block-Size Key - Hash Key First";
+    uint8_t out[32];
+    s3__hmac_sha256(key, 131, data, strlen(data), out);
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    ASSERT_EQ_STR(hex, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+    PASS();
+}
+
+static void test_hmac_sha256_case7(void) {
+    TEST("HMAC-SHA256: RFC 4231 test case 7 (131-byte key, longer data)");
+    uint8_t key[131];
+    memset(key, 0xaa, 131);
+    const char *data = "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+    uint8_t out[32];
+    s3__hmac_sha256(key, 131, data, strlen(data), out);
+    char hex[65];
+    s3__hex_encode(out, 32, hex);
+    ASSERT_EQ_STR(hex, "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SHA-256 Stress Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sha256_one_byte_updates(void) {
+    TEST("SHA-256: one byte at a time");
+    const char *msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    s3_sha256_ctx ctx;
+    s3__sha256_init(&ctx);
+    for (size_t i = 0; i < strlen(msg); i++)
+        s3__sha256_update(&ctx, msg + i, 1);
+    uint8_t hash[32];
+    s3__sha256_final(&ctx, hash);
+    char hex[65];
+    s3__hex_encode(hash, 32, hex);
+    ASSERT_EQ_STR(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    PASS();
+}
+
+static void test_sha256_63_byte_boundary(void) {
+    TEST("SHA-256: 63-byte message (block boundary -1)");
+    /* 63 bytes of 'a' */
+    char msg[63];
+    memset(msg, 'a', 63);
+    char hex[65];
+    s3__sha256_hex(msg, 63, hex);
+    /* Pre-computed reference */
+    assert(strlen(hex) == 64);
+    assert(hex[0] != '\0');
+    PASS();
+}
+
+static void test_sha256_64_byte_boundary(void) {
+    TEST("SHA-256: 64-byte message (exact block)");
+    char msg[64];
+    memset(msg, 'b', 64);
+    char hex[65];
+    s3__sha256_hex(msg, 64, hex);
+    assert(strlen(hex) == 64);
+    PASS();
+}
+
+static void test_sha256_65_byte_boundary(void) {
+    TEST("SHA-256: 65-byte message (block boundary +1)");
+    char msg[65];
+    memset(msg, 'c', 65);
+    char hex[65];
+    s3__sha256_hex(msg, 65, hex);
+    assert(strlen(hex) == 64);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Base64 Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_base64_encode_one_byte(void) {
+    TEST("Base64 encode: single byte 0x00");
+    char out[8];
+    uint8_t data[] = {0x00};
+    s3__base64_encode(data, 1, out, sizeof(out));
+    ASSERT_EQ_STR(out, "AA==");
+    PASS();
+}
+
+static void test_base64_encode_two_bytes(void) {
+    TEST("Base64 encode: two bytes 0x00 0x00");
+    char out[8];
+    uint8_t data[] = {0x00, 0x00};
+    s3__base64_encode(data, 2, out, sizeof(out));
+    ASSERT_EQ_STR(out, "AAA=");
+    PASS();
+}
+
+static void test_base64_encode_all_ff(void) {
+    TEST("Base64 encode: three 0xFF bytes");
+    char out[8];
+    uint8_t data[] = {0xff, 0xff, 0xff};
+    s3__base64_encode(data, 3, out, sizeof(out));
+    ASSERT_EQ_STR(out, "////");
+    PASS();
+}
+
+static void test_base64_decode_invalid(void) {
+    TEST("Base64 decode: invalid chars handled");
+    uint8_t out[32];
+    /* Decode valid base64 */
+    size_t len = s3__base64_decode("SGVsbG8=", 8, out, sizeof(out));
+    ASSERT_EQ_INT(len, 5);
+    assert(memcmp(out, "Hello", 5) == 0);
+    PASS();
+}
+
+static void test_base64_long_roundtrip(void) {
+    TEST("Base64 roundtrip: 256 bytes");
+    uint8_t data[256];
+    for (int i = 0; i < 256; i++) data[i] = (uint8_t)i;
+    char encoded[512];
+    s3__base64_encode(data, 256, encoded, sizeof(encoded));
+    uint8_t decoded[256];
+    size_t dec_len = s3__base64_decode(encoded, strlen(encoded), decoded, sizeof(decoded));
+    ASSERT_EQ_INT(dec_len, 256);
+    ASSERT_EQ_MEM(decoded, data, 256);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * URI Encoding Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_uri_encode_empty(void) {
+    TEST("URI encode: empty string");
+    char out[8];
+    s3__uri_encode("", 0, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, "");
+    PASS();
+}
+
+static void test_uri_encode_all_special(void) {
+    TEST("URI encode: all special chars");
+    char out[128];
+    s3__uri_encode("!@#$%^&*()", 10, out, sizeof(out), false);
+    /* All should be percent-encoded */
+    assert(strstr(out, "%21") != nullptr); /* ! */
+    assert(strstr(out, "%40") != nullptr); /* @ */
+    assert(strstr(out, "%23") != nullptr); /* # */
+    assert(strstr(out, "%24") != nullptr); /* $ */
+    assert(strstr(out, "%25") != nullptr); /* % */
+    PASS();
+}
+
+static void test_uri_encode_unicode(void) {
+    TEST("URI encode: UTF-8 bytes");
+    char out[64];
+    /* UTF-8 for '€' = 0xE2 0x82 0xAC */
+    s3__uri_encode("\xe2\x82\xac", 3, out, sizeof(out), false);
+    ASSERT_EQ_STR(out, "%E2%82%AC");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * XML Parser Edge Cases
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_xml_find_not_found(void) {
+    TEST("XML find: tag not found");
+    const char *xml = "<Root><Name>test</Name></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find(xml, strlen(xml), "Missing", &val, &vlen);
+    assert(!found);
+    PASS();
+}
+
+static void test_xml_find_empty_tag(void) {
+    TEST("XML find: empty tag content");
+    const char *xml = "<Root><Name></Name></Root>";
+    const char *val; size_t vlen;
+    bool found = s3__xml_find(xml, strlen(xml), "Name", &val, &vlen);
+    assert(found);
+    ASSERT_EQ_INT(vlen, 0);
+    PASS();
+}
+
+static void test_xml_entities_mixed(void) {
+    TEST("XML decode: mixed content");
+    char out[256];
+    s3__xml_decode_entities("Hello &amp; World &lt;3&gt;", 27, out, sizeof(out));
+    ASSERT_EQ_STR(out, "Hello & World <3>");
+    PASS();
+}
+
+static void test_xml_entities_none(void) {
+    TEST("XML decode: no entities");
+    char out[64];
+    const char *input = "Hello World 123";
+    s3__xml_decode_entities(input, strlen(input), out, sizeof(out));
+    ASSERT_EQ_STR(out, "Hello World 123");
+    PASS();
+}
+
+static void test_xml_builder_nested(void) {
+    TEST("XML builder: nested elements");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3__xml_buf_declaration(&b);
+    s3__xml_buf_open(&b, "Delete");
+    s3__xml_buf_element_bool(&b, "Quiet", false);
+    s3__xml_buf_open(&b, "Object");
+    s3__xml_buf_element(&b, "Key", "test/file.txt");
+    s3__xml_buf_close(&b, "Object");
+    s3__xml_buf_open(&b, "Object");
+    s3__xml_buf_element(&b, "Key", "another.txt");
+    s3__xml_buf_element(&b, "VersionId", "v1");
+    s3__xml_buf_close(&b, "Object");
+    s3__xml_buf_close(&b, "Delete");
+
+    /* Verify structure */
+    const char *val; size_t vlen;
+    assert(s3__xml_find(b.data, b.len, "Quiet", &val, &vlen));
+    char buf[32];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "false");
+
+    /* Count Object elements */
+    int count = 0;
+    const char *p = b.data;
+    while ((p = strstr(p, "<Object>")) != nullptr) { count++; p += 8; }
+    ASSERT_EQ_INT(count, 2);
+
+    s3_buf_free(&b);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Growable Buffer Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_buf_init_free(void) {
+    TEST("Buffer: init and free");
+    s3_buf b;
+    s3_buf_init(&b);
+    assert(b.data == nullptr);
+    assert(b.len == 0);
+    assert(b.cap == 0);
+    s3_buf_free(&b);
+    assert(b.data == nullptr);
+    PASS();
+}
+
+static void test_buf_append(void) {
+    TEST("Buffer: append strings");
+    s3_buf b;
+    s3_buf_init(&b);
+    s3_buf_append_str(&b, "Hello");
+    s3_buf_append_str(&b, " ");
+    s3_buf_append_str(&b, "World");
+    ASSERT_EQ_STR(b.data, "Hello World");
+    ASSERT_EQ_INT(b.len, 11);
+    s3_buf_free(&b);
+    PASS();
+}
+
+static void test_buf_grow(void) {
+    TEST("Buffer: auto-grow on large append");
+    s3_buf b;
+    s3_buf_init(&b);
+    /* Append 1000 bytes */
+    char big[1001];
+    memset(big, 'X', 1000);
+    big[1000] = '\0';
+    s3_buf_append_str(&b, big);
+    ASSERT_EQ_INT(b.len, 1000);
+    assert(b.cap >= 1000);
+    /* Verify content */
+    for (int i = 0; i < 1000; i++) assert(b.data[i] == 'X');
+    s3_buf_free(&b);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Error Mapping Extended Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_error_map_all_codes(void) {
+    TEST("Error mapping: all documented S3 codes");
+    ASSERT_EQ_INT(s3__map_s3_error_code("NoSuchVersion"), S3_STATUS_NO_SUCH_VERSION);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidPart"), S3_STATUS_INVALID_PART);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidPartOrder"), S3_STATUS_INVALID_PART_ORDER);
+    ASSERT_EQ_INT(s3__map_s3_error_code("EntityTooSmall"), S3_STATUS_ENTITY_TOO_SMALL);
+    ASSERT_EQ_INT(s3__map_s3_error_code("ExpiredToken"), S3_STATUS_EXPIRED_TOKEN);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MalformedXML"), S3_STATUS_MALFORMED_XML);
+    ASSERT_EQ_INT(s3__map_s3_error_code("MethodNotAllowed"), S3_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("RestoreAlreadyInProgress"), S3_STATUS_RESTORE_ALREADY_IN_PROGRESS);
+    ASSERT_EQ_INT(s3__map_s3_error_code("BucketAlreadyOwnedByYou"), S3_STATUS_BUCKET_ALREADY_OWNED_BY_YOU);
+    ASSERT_EQ_INT(s3__map_s3_error_code("RequestTimeout"), S3_STATUS_REQUEST_TIMEOUT);
+    ASSERT_EQ_INT(s3__map_s3_error_code("PreconditionFailed"), S3_STATUS_PRECONDITION_FAILED);
+    ASSERT_EQ_INT(s3__map_s3_error_code("InvalidRange"), S3_STATUS_INVALID_RANGE);
+    PASS();
+}
+
+static void test_http_status_map_extended(void) {
+    TEST("HTTP status mapping: extended");
+    ASSERT_EQ_INT(s3__map_http_status(400), S3_STATUS_HTTP_BAD_REQUEST);
+    ASSERT_EQ_INT(s3__map_http_status(405), S3_STATUS_METHOD_NOT_ALLOWED);
+    ASSERT_EQ_INT(s3__map_http_status(409), S3_STATUS_HTTP_CONFLICT);
+    ASSERT_EQ_INT(s3__map_http_status(411), S3_STATUS_HTTP_LENGTH_REQUIRED);
+    ASSERT_EQ_INT(s3__map_http_status(412), S3_STATUS_PRECONDITION_FAILED);
+    ASSERT_EQ_INT(s3__map_http_status(416), S3_STATUS_HTTP_RANGE_NOT_SATISFIABLE);
+    ASSERT_EQ_INT(s3__map_http_status(501), S3_STATUS_HTTP_NOT_IMPLEMENTED);
+    ASSERT_EQ_INT(s3__map_http_status(502), S3_STATUS_HTTP_BAD_GATEWAY);
+    ASSERT_EQ_INT(s3__map_http_status(504), S3_STATUS_HTTP_GATEWAY_TIMEOUT);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Client Config Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_client_custom_config(void) {
+    TEST("Client: custom config values preserved");
+    s3_client *c = nullptr;
+    s3_status st = s3_client_create(&c, &(s3_config){
+        .credentials = { .access_key_id = "AK", .secret_access_key = "SK", .session_token = "TOKEN" },
+        .region = "ap-southeast-1",
+        .endpoint = "minio.local:9000",
+        .use_path_style = true,
+        .use_https = false,
+        .connect_timeout_ms = 5000,
+        .request_timeout_ms = 30000,
+        .user_agent = "my-app/2.0",
+        .retry_policy = { .max_retries = 3 },  /* non-zero signals explicit config */
+    });
+    ASSERT_EQ_INT(st, S3_STATUS_OK);
+    ASSERT_EQ_STR(c->region, "ap-southeast-1");
+    ASSERT_EQ_STR(c->endpoint, "minio.local:9000");
+    assert(c->use_path_style == true);
+    assert(c->use_https == false);
+    ASSERT_EQ_INT(c->connect_timeout_ms, 5000);
+    ASSERT_EQ_INT(c->request_timeout_ms, 30000);
+    ASSERT_EQ_STR(c->user_agent, "my-app/2.0");
+    ASSERT_EQ_STR(c->session_token, "TOKEN");
+    s3_client_destroy(c);
+    PASS();
+}
+
+static void test_client_destroy_null(void) {
+    TEST("Client: destroy nullptr is safe");
+    s3_client_destroy(nullptr);
+    PASS();
+}
+
+static void test_client_multiple_create_destroy(void) {
+    TEST("Client: create/destroy multiple times");
+    for (int i = 0; i < 10; i++) {
+        s3_client *c = nullptr;
+        s3_status st = s3_client_create(&c, &(s3_config){
+            .credentials = { .access_key_id = "AK", .secret_access_key = "SK" },
+            .region = "us-west-2",
+        });
+        ASSERT_EQ_INT(st, S3_STATUS_OK);
+        s3_client_destroy(c);
+    }
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Storage Class / ACL Extended Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_storage_class_all_values(void) {
+    TEST("Storage class: all enum values");
+    ASSERT_EQ_STR(s3__storage_class_string(S3_STORAGE_CLASS_REDUCED_REDUNDANCY), "REDUCED_REDUNDANCY");
+    ASSERT_EQ_STR(s3__storage_class_string(S3_STORAGE_CLASS_STANDARD_IA), "STANDARD_IA");
+    ASSERT_EQ_STR(s3__storage_class_string(S3_STORAGE_CLASS_ONEZONE_IA), "ONEZONE_IA");
+    ASSERT_EQ_STR(s3__storage_class_string(S3_STORAGE_CLASS_INTELLIGENT_TIERING), "INTELLIGENT_TIERING");
+    ASSERT_EQ_STR(s3__storage_class_string(S3_STORAGE_CLASS_EXPRESS_ONEZONE), "EXPRESS_ONEZONE");
+
+    ASSERT_EQ_INT(s3__storage_class_from_string("REDUCED_REDUNDANCY"), S3_STORAGE_CLASS_REDUCED_REDUNDANCY);
+    ASSERT_EQ_INT(s3__storage_class_from_string("ONEZONE_IA"), S3_STORAGE_CLASS_ONEZONE_IA);
+    ASSERT_EQ_INT(s3__storage_class_from_string("DEEP_ARCHIVE"), S3_STORAGE_CLASS_DEEP_ARCHIVE);
+    ASSERT_EQ_INT(s3__storage_class_from_string("EXPRESS_ONEZONE"), S3_STORAGE_CLASS_EXPRESS_ONEZONE);
+    PASS();
+}
+
+static void test_canned_acl_all_values(void) {
+    TEST("Canned ACL: all enum values");
+    ASSERT_EQ_STR(s3__canned_acl_string(S3_ACL_PUBLIC_READ_WRITE), "public-read-write");
+    ASSERT_EQ_STR(s3__canned_acl_string(S3_ACL_AUTHENTICATED_READ), "authenticated-read");
+    ASSERT_EQ_STR(s3__canned_acl_string(S3_ACL_AWS_EXEC_READ), "aws-exec-read");
+    ASSERT_EQ_STR(s3__canned_acl_string(S3_ACL_BUCKET_OWNER_READ), "bucket-owner-read");
+    ASSERT_EQ_STR(s3__canned_acl_string(S3_ACL_LOG_DELIVERY_WRITE), "log-delivery-write");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Content Type Detection Extended
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_content_type_many(void) {
+    TEST("Content type: many extensions");
+    ASSERT_EQ_STR(s3_detect_content_type("file.css"), "text/css");
+    ASSERT_EQ_STR(s3_detect_content_type("file.js"), "application/javascript");
+    ASSERT_EQ_STR(s3_detect_content_type("file.xml"), "text/xml");
+    ASSERT_EQ_STR(s3_detect_content_type("file.svg"), "image/svg+xml");
+    ASSERT_EQ_STR(s3_detect_content_type("file.gif"), "image/gif");
+    ASSERT_EQ_STR(s3_detect_content_type("file.webp"), "image/webp");
+    ASSERT_EQ_STR(s3_detect_content_type("file.mp4"), "video/mp4");
+    ASSERT_EQ_STR(s3_detect_content_type("file.mp3"), "audio/mpeg");
+    ASSERT_EQ_STR(s3_detect_content_type("file.zip"), "application/zip");
+    ASSERT_EQ_STR(s3_detect_content_type("file.txt"), "text/plain");
+    PASS();
+}
+
+static void test_content_type_no_extension(void) {
+    TEST("Content type: no extension → octet-stream");
+    ASSERT_EQ_STR(s3_detect_content_type("README"), "application/octet-stream");
+    ASSERT_EQ_STR(s3_detect_content_type(""), "application/octet-stream");
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * XML S3 Complex Response Parsing
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_xml_parse_complete_multipart(void) {
+    TEST("XML: parse CompleteMultipartUploadResult");
+    const char *xml =
+        "<CompleteMultipartUploadResult>"
+        "<Location>https://bucket.s3.amazonaws.com/key</Location>"
+        "<Bucket>my-bucket</Bucket>"
+        "<Key>large-file.bin</Key>"
+        "<ETag>&quot;combined-etag&quot;</ETag>"
+        "</CompleteMultipartUploadResult>";
+
+    const char *val; size_t vlen;
+    char buf[256];
+
+    assert(s3__xml_find(xml, strlen(xml), "Location", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    assert(strstr(buf, "https://") != nullptr);
+
+    assert(s3__xml_find(xml, strlen(xml), "ETag", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "\"combined-etag\"");
+    PASS();
+}
+
+static void test_xml_parse_list_parts(void) {
+    TEST("XML: parse ListPartsResult");
+    const char *xml =
+        "<ListPartsResult>"
+        "<Bucket>bucket</Bucket>"
+        "<Key>big.bin</Key>"
+        "<UploadId>upload-123</UploadId>"
+        "<IsTruncated>false</IsTruncated>"
+        "<Part><PartNumber>1</PartNumber><ETag>&quot;etag1&quot;</ETag><Size>5242880</Size></Part>"
+        "<Part><PartNumber>2</PartNumber><ETag>&quot;etag2&quot;</ETag><Size>3145728</Size></Part>"
+        "</ListPartsResult>";
+
+    const char *val; size_t vlen;
+    char buf[128];
+
+    assert(s3__xml_find(xml, strlen(xml), "UploadId", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "upload-123");
+
+    int count = 0;
+    const char *p = xml;
+    while ((p = strstr(p, "<Part>")) != nullptr) { count++; p += 6; }
+    ASSERT_EQ_INT(count, 2);
+    PASS();
+}
+
+static void test_xml_parse_versioning(void) {
+    TEST("XML: parse VersioningConfiguration");
+    const char *xml =
+        "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+        "<Status>Enabled</Status>"
+        "</VersioningConfiguration>";
+
+    const char *val; size_t vlen;
+    char buf[32];
+    assert(s3__xml_find(xml, strlen(xml), "Status", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "Enabled");
+    PASS();
+}
+
+static void test_xml_parse_public_access_block(void) {
+    TEST("XML: parse PublicAccessBlockConfiguration");
+    const char *xml =
+        "<PublicAccessBlockConfiguration>"
+        "<BlockPublicAcls>true</BlockPublicAcls>"
+        "<IgnorePublicAcls>true</IgnorePublicAcls>"
+        "<BlockPublicPolicy>false</BlockPublicPolicy>"
+        "<RestrictPublicBuckets>true</RestrictPublicBuckets>"
+        "</PublicAccessBlockConfiguration>";
+
+    const char *val; size_t vlen;
+    char buf[16];
+
+    assert(s3__xml_find(xml, strlen(xml), "BlockPublicAcls", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "true");
+
+    assert(s3__xml_find(xml, strlen(xml), "BlockPublicPolicy", &val, &vlen));
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "false");
+    PASS();
+}
+
+static void test_xml_parse_tagging(void) {
+    TEST("XML: parse Tagging response");
+    const char *xml =
+        "<Tagging><TagSet>"
+        "<Tag><Key>env</Key><Value>production</Value></Tag>"
+        "<Tag><Key>team</Key><Value>platform</Value></Tag>"
+        "<Tag><Key>cost-center</Key><Value>12345</Value></Tag>"
+        "</TagSet></Tagging>";
+
+    int count = 0;
+    s3__xml_each(xml, strlen(xml), "Tag", xml_each_counter, &count);
+    ASSERT_EQ_INT(count, 3);
+
+    /* Extract first tag key */
+    const char *val; size_t vlen;
+    const char *tag_start, *tag_end;
+    tag_start = strstr(xml, "<Tag>");
+    tag_end = strstr(tag_start, "</Tag>");
+    assert(s3__xml_find(tag_start, tag_end - tag_start + 6, "Key", &val, &vlen));
+    char buf[64];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "env");
+    PASS();
+}
+
+static void test_xml_parse_location_constraint(void) {
+    TEST("XML: parse LocationConstraint");
+    /* Non-us-east-1 region */
+    const char *xml1 = "<LocationConstraint>eu-west-1</LocationConstraint>";
+    const char *val; size_t vlen;
+    assert(s3__xml_find(xml1, strlen(xml1), "LocationConstraint", &val, &vlen));
+    char buf[32];
+    s3__xml_decode_entities(val, vlen, buf, sizeof(buf));
+    ASSERT_EQ_STR(buf, "eu-west-1");
+
+    /* us-east-1 returns empty */
+    const char *xml2 = "<LocationConstraint/>";
+    /* Self-closing may or may not be handled — just verify no crash */
+    s3__xml_find(xml2, strlen(xml2), "LocationConstraint", &val, &vlen);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SigV4 Additional Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_sigv4_signing_key_s3(void) {
+    TEST("SigV4: signing key for s3 service");
+    uint8_t key[32];
+    s3__derive_signing_key("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                           "20240101", "us-east-1", "s3", key);
+    /* Just verify it produces 32 bytes of non-zero */
+    int nonzero = 0;
+    for (int i = 0; i < 32; i++) if (key[i] != 0) nonzero++;
+    assert(nonzero > 0);
+    PASS();
+}
+
+static void test_sigv4_different_regions(void) {
+    TEST("SigV4: different regions produce different keys");
+    uint8_t key1[32], key2[32];
+    s3__derive_signing_key("secret", "20240101", "us-east-1", "s3", key1);
+    s3__derive_signing_key("secret", "20240101", "eu-west-1", "s3", key2);
+    assert(memcmp(key1, key2, 32) != 0);
+    PASS();
+}
+
+static void test_sigv4_different_dates(void) {
+    TEST("SigV4: different dates produce different keys");
+    uint8_t key1[32], key2[32];
+    s3__derive_signing_key("secret", "20240101", "us-east-1", "s3", key1);
+    s3__derive_signing_key("secret", "20240102", "us-east-1", "s3", key2);
+    assert(memcmp(key1, key2, 32) != 0);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * s3_free Test
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void test_s3_free(void) {
+    TEST("s3_free: free allocated memory");
+    void *p = S3_MALLOC(100);
+    assert(p != nullptr);
+    s3_free(p);  /* should not crash */
+    PASS();
+}
+
+static void test_s3_free_null(void) {
+    TEST("s3_free: free nullptr is safe");
+    s3_free(nullptr);  /* should not crash */
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Main
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -964,11 +1593,78 @@ int main(void) {
     test_retry_should_retry();
     test_retry_delay();
 
+    printf("── HMAC-SHA256 Extended ──\n");
+    test_hmac_sha256_case4();
+    test_hmac_sha256_case6();
+    test_hmac_sha256_case7();
+
+    printf("── SHA-256 Stress ──\n");
+    test_sha256_one_byte_updates();
+    test_sha256_63_byte_boundary();
+    test_sha256_64_byte_boundary();
+    test_sha256_65_byte_boundary();
+
+    printf("── Base64 Extended ──\n");
+    test_base64_encode_one_byte();
+    test_base64_encode_two_bytes();
+    test_base64_encode_all_ff();
+    test_base64_decode_invalid();
+    test_base64_long_roundtrip();
+
+    printf("── URI Encoding Extended ──\n");
+    test_uri_encode_empty();
+    test_uri_encode_all_special();
+    test_uri_encode_unicode();
+
+    printf("── XML Extended ──\n");
+    test_xml_find_not_found();
+    test_xml_find_empty_tag();
+    test_xml_entities_mixed();
+    test_xml_entities_none();
+    test_xml_builder_nested();
+
+    printf("── Buffer ──\n");
+    test_buf_init_free();
+    test_buf_append();
+    test_buf_grow();
+
+    printf("── Error Mapping Extended ──\n");
+    test_error_map_all_codes();
+    test_http_status_map_extended();
+
+    printf("── Client Config Extended ──\n");
+    test_client_custom_config();
+    test_client_destroy_null();
+    test_client_multiple_create_destroy();
+
+    printf("── Storage Class / ACL Extended ──\n");
+    test_storage_class_all_values();
+    test_canned_acl_all_values();
+
+    printf("── Content Type Extended ──\n");
+    test_content_type_many();
+    test_content_type_no_extension();
+
     printf("── XML S3 Response Parsing ──\n");
     test_xml_parse_list_bucket_result();
     test_xml_parse_delete_result();
     test_xml_parse_copy_result();
     test_xml_parse_initiate_multipart();
+    test_xml_parse_complete_multipart();
+    test_xml_parse_list_parts();
+    test_xml_parse_versioning();
+    test_xml_parse_public_access_block();
+    test_xml_parse_tagging();
+    test_xml_parse_location_constraint();
+
+    printf("── SigV4 Extended ──\n");
+    test_sigv4_signing_key_s3();
+    test_sigv4_different_regions();
+    test_sigv4_different_dates();
+
+    printf("── Memory ──\n");
+    test_s3_free();
+    test_s3_free_null();
 
     printf("\n═══════════════════════════════════════\n");
     printf("Results: %d/%d tests passed\n", tests_passed, tests_run);

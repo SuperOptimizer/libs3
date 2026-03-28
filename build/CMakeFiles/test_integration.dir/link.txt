@@ -1,0 +1,1 @@
+/usr/lib/ccache/gcc -Wl,--dependency-file=CMakeFiles/test_integration.dir/link.d CMakeFiles/test_integration.dir/tests/test_integration.c.o -o test_integration  libs3.a /usr/lib/aarch64-linux-gnu/libcurl.so /usr/lib/aarch64-linux-gnu/libcurl.so

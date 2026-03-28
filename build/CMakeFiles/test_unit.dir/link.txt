@@ -1,0 +1,1 @@
+/usr/lib/ccache/gcc -Wl,--dependency-file=CMakeFiles/test_unit.dir/link.d CMakeFiles/test_unit.dir/tests/test_crypto.c.o -o test_unit  libs3.a /usr/lib/aarch64-linux-gnu/libcurl.so /usr/lib/aarch64-linux-gnu/libcurl.so
