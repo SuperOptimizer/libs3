@@ -1,0 +1,62 @@
+# AFL++ dictionary for libs3's S3/IMDS response parsers.
+# Tokens the scrapers key off -- gives the mutator the magic strings it
+# would otherwise need millions of execs to discover.
+
+# --- ListObjectsV2 / list XML ---
+xml_lbr_open="<ListBucketResult>"
+xml_lbr_close="</ListBucketResult>"
+xml_contents_open="<Contents>"
+xml_contents_close="</Contents>"
+xml_key_open="<Key>"
+xml_key_close="</Key>"
+xml_size_open="<Size>"
+xml_size_close="</Size>"
+xml_etag_open="<ETag>"
+xml_etag_close="</ETag>"
+xml_cprefix_open="<CommonPrefixes>"
+xml_cprefix_close="</CommonPrefixes>"
+xml_prefix_open="<Prefix>"
+xml_prefix_close="</Prefix>"
+xml_trunc_open="<IsTruncated>"
+xml_trunc_close="</IsTruncated>"
+xml_nct_open="<NextContinuationToken>"
+xml_nct_close="</NextContinuationToken>"
+xml_truncated_true="true"
+xml_truncated_false="false"
+
+# --- multipart XML ---
+xml_uploadid_open="<UploadId>"
+xml_uploadid_close="</UploadId>"
+xml_initmpu="<InitiateMultipartUploadResult>"
+xml_completempu="<CompleteMultipartUploadResult>"
+xml_part_open="<Part>"
+xml_partnumber="<PartNumber>"
+
+# --- XML structural ---
+xml_decl="<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+xml_amp="&amp;"
+xml_lt="&lt;"
+xml_cdata="<![CDATA["
+
+# --- IMDS / export-credentials JSON keys ---
+json_akid="\"AccessKeyId\""
+json_secret="\"SecretAccessKey\""
+json_token="\"Token\""
+json_sessiontoken="\"SessionToken\""
+json_expiration="\"Expiration\""
+json_code="\"Code\""
+json_success="\"Success\""
+json_type="\"Type\""
+json_lastupdated="\"LastUpdated\""
+json_brace_open="{"
+json_brace_close="}"
+json_esc_quote="\\\""
+json_esc_backslash="\\\\"
+
+# --- s3:// URL forms ---
+url_s3="s3://"
+url_s3_upper="S3://"
+url_s3_region="s3+us-east-1://"
+url_pct2f="%2F"
+url_pct20="%20"
+url_plus="+"

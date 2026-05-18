@@ -1,0 +1,2 @@
+@<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>libs3-test</Bucket><Key>fuzzcap.bin</Key><UploadId>NTI5NWQ3NmItNWRlOS00ZDUxLWI3NDYtNmYzYWZkMDFhY2ZhLjE1Y2VlNTM5LWI4YjUtNGVmNS1hZjk1LThiMDY1ZTMwNjkwZHgxNzc5MTI3Mzk1MDU4NDE3OTUy</UploadId></InitiateMultipartUploadResult>

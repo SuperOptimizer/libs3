@@ -53,3 +53,26 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Build directories
+build/
+build-*/
+
+# Coverage artifacts
+*.gcno
+*.gcda
+*.gcov
+coverage.info
+coverage/
+
+# Fuzzing artifacts -- keep sources (fuzz_parsers.c, *.sh, s3.dict) and
+# the curated/scrubbed seed corpus (fuzz/corpus/seeds) only; drop built
+# binaries, run output, and the machine-generated corpus.
+fuzz/findings/
+fuzz/corpus/all/
+fuzz/corpus/min/
+fuzz/autotokens.so
+fuzz/fuzz_parsers
+fuzz/fuzz_parsers_afl
+fuzz/fuzz_parsers_cmplog
+# (only the curated, scrubbed seed corpus fuzz/corpus/seeds/ is tracked)

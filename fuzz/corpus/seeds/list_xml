@@ -1,0 +1,1 @@
+@<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>tok+a/b=</NextContinuationToken><Contents><Key>p%2Fa.bin</Key><Size>123</Size><ETag>"x"</ETag></Contents><CommonPrefixes><Prefix>d%2F</Prefix></CommonPrefixes></ListBucketResult>

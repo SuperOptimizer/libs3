@@ -1,0 +1,2 @@
+@<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>vesuvius-challenge-open-data</Name><Prefix>PHerc0172/volumes/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><Delimiter>/</Delimiter><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>PHerc0172/volumes/20241024131838-7.910um-53keV-masked.zarr/</Prefix></CommonPrefixes></ListBucketResult>

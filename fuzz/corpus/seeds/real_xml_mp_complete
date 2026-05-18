@@ -1,0 +1,2 @@
+@<?xml version="1.0" encoding="UTF-8"?>
+<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Location>http://localhost:9000/libs3-test/fuzzcap.bin</Location><Bucket>libs3-test</Bucket><Key>fuzzcap.bin</Key><ETag>&#34;6526d496701abec54f0b535bffa17f84-1&#34;</ETag></CompleteMultipartUploadResult>

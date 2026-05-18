@@ -1,0 +1,30 @@
+# Local MinIO for libs3 write/multipart end-to-end testing.
+#   docker compose -f test/docker-compose.minio.yml up -d
+#   LIBS3_MINIO=1 ./build/test_minio
+#   docker compose -f test/docker-compose.minio.yml down
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --address ":9000"
+    environment:
+      MINIO_ROOT_USER: libs3test
+      MINIO_ROOT_PASSWORD: libs3secret
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: wait for MinIO, then create the test bucket.
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 libs3test libs3secret &&
+      mc mb -p local/libs3-test &&
+      echo 'bucket libs3-test ready'"
