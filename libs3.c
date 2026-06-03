@@ -1046,7 +1046,8 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
         if (sink) {
             rewind(sink);                 /* fresh write each retry */
 #if defined(__unix__) || defined(__APPLE__)
-            (void)ftruncate(fileno(sink), 0);
+            if (ftruncate(fileno(sink), 0) != 0) { /* best-effort: rewind already
+                reset the offset; a non-regular sink (pipe) just can't truncate */ }
 #endif
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, sink);
