@@ -31,6 +31,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>   /* ftruncate, fileno (sink rewind on retry) */
+#endif
 #include <time.h>
 
 /* ================================================================== */
@@ -106,14 +109,23 @@ static void set_error(const char *fmt, ...) {
 
 static atomic_int  g_curl_refcount = 0;
 static atomic_bool g_abort_flag    = false;
+static pthread_mutex_t g_curl_init_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void curl_global_ref(void) {
-    if (atomic_fetch_add(&g_curl_refcount, 1) == 0)
+    /* curl_global_init() is NOT thread-safe and must FINISH before any thread
+     * uses curl. The old atomic-refcount-only version let a second concurrent
+     * caller proceed while init was still running. Serialize under a mutex so
+     * concurrent s3_client_new() (e.g. opening two volumes at once) is safe. */
+    pthread_mutex_lock(&g_curl_init_mtx);
+    if (g_curl_refcount++ == 0)
         curl_global_init(CURL_GLOBAL_DEFAULT);
+    pthread_mutex_unlock(&g_curl_init_mtx);
 }
 static void curl_global_unref(void) {
-    if (atomic_fetch_sub(&g_curl_refcount, 1) == 1)
+    pthread_mutex_lock(&g_curl_init_mtx);
+    if (--g_curl_refcount == 0)
         curl_global_cleanup();
+    pthread_mutex_unlock(&g_curl_init_mtx);
 }
 
 void s3_global_abort(void)      { atomic_store(&g_abort_flag, true); }
@@ -472,6 +484,12 @@ static size_t write_cb(char *ptr, size_t sz, size_t nm, void *ud) {
     return buf_append(b, ptr, n) ? n : 0;
 }
 
+/* Streaming sink: write the body straight to a FILE* in constant memory
+ * (used by s3_get_to_file so large objects never buffer fully in RAM). */
+static size_t file_write_cb(char *ptr, size_t sz, size_t nm, void *ud) {
+    return fwrite(ptr, sz, nm, (FILE *)ud) * sz;
+}
+
 /* Trim a header value (skip prefix, strip surrounding ws/CRLF) into *dst. */
 static void hdr_store(char **dst, const char *line, size_t n, size_t skip) {
     const char *v = line + skip;
@@ -556,6 +574,7 @@ static char *imds_request(const char *url, bool put, const char *token) {
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, str_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);   /* thread-safe timeouts */
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 1000L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 2000L);
     curl_easy_setopt(curl, CURLOPT_NOPROXY, "169.254.169.254");
@@ -979,6 +998,7 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
                             const char *content_type,
                             const char *range,
                             const struct curl_slist *extra_hdrs,
+                            FILE *sink,        /* if set, stream body here (no RAM buffer) */
                             s3_response *resp) {
     if (!c || !url || !resp) return S3_ERR_INVALID_ARG;
     memset(resp, 0, sizeof *resp);
@@ -1000,8 +1020,19 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
         curl_easy_reset(curl);
 
         curl_easy_setopt(curl, CURLOPT_URL, resolved);
+        /* NOSIGNAL is required for thread safety: without it libcurl uses
+         * SIGALRM + sigsuspend for timeouts, which races/hangs when multiple
+         * threads run transfers concurrently. */
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, c->connect_timeout_s);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, c->transfer_timeout_s);
+        /* Abort on STALL, not on size: CURLOPT_TIMEOUT is a hard cap on the whole
+         * transfer, which kills large (>1GB) shard downloads that simply take a
+         * while — they'd time out mid-transfer and restart forever. Use a low-
+         * speed watchdog instead: abort only if throughput stays under
+         * LOW_SPEED_LIMIT bytes/s for LOW_SPEED_TIME seconds (a dead/stalled
+         * connection), letting a slow-but-progressing big download finish. */
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);             /* 1 KB/s */
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, c->transfer_timeout_s);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 30L);
@@ -1012,8 +1043,17 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
         curl_easy_setopt(curl, CURLOPT_USERAGENT, c->user_agent);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &bbuf);
+        if (sink) {
+            rewind(sink);                 /* fresh write each retry */
+#if defined(__unix__) || defined(__APPLE__)
+            (void)ftruncate(fileno(sink), 0);
+#endif
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, sink);
+        } else {
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &bbuf);
+        }
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
 
@@ -1085,8 +1125,9 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
         if (hdrs) curl_slist_free_all(hdrs);
 
         if (code == CURLE_OK) {
+            if (sink) fflush(sink);
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status);
-            resp->body = bbuf.data;
+            resp->body = bbuf.data;       /* NULL when streamed to sink */
             resp->body_len = bbuf.len;
             bool retryable = resp->status >= 500 ||
                              resp->status == 401 || resp->status == 403;
@@ -1128,7 +1169,14 @@ void s3_response_free(s3_response *r) {
 /* ================================================================== */
 
 s3_status s3_get(s3_client *c, const char *url, s3_response *resp) {
-    return do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, resp);
+    return do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, resp);
+}
+
+s3_status s3_get_to_file(s3_client *c, const char *url, FILE *sink, s3_response *resp) {
+    if (!sink) return S3_ERR_INVALID_ARG;
+    /* Streams the body straight to `sink` (constant memory); resp->body stays
+     * NULL. resp->status/headers are still filled. */
+    return do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, sink, resp);
 }
 
 s3_status s3_get_range(s3_client *c, const char *url,
@@ -1141,31 +1189,31 @@ s3_status s3_get_range(s3_client *c, const char *url,
     snprintf(range, sizeof range, "%llu-%llu",
              (unsigned long long)offset,
              (unsigned long long)(offset + length - 1));
-    return do_request(c, url, M_GET_RANGE, NULL, 0, NULL, 0, NULL, range, NULL, resp);
+    return do_request(c, url, M_GET_RANGE, NULL, 0, NULL, 0, NULL, range, NULL, NULL, resp);
 }
 
 s3_status s3_get_conditional(s3_client *c, const char *url,
                              const char *if_none_match, s3_response *resp) {
     if (!if_none_match || !if_none_match[0])
-        return do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, resp);
+        return do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, resp);
     char *hv = str_appendf(NULL, "If-None-Match: %s", if_none_match);
     if (!hv) return S3_ERR_OOM;
     struct curl_slist *h = curl_slist_append(NULL, hv);
     free(hv);
-    s3_status rc = do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, h, resp);
+    s3_status rc = do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, h, NULL, resp);
     curl_slist_free_all(h);
     return rc;
 }
 
 s3_status s3_head(s3_client *c, const char *url, s3_response *resp) {
-    return do_request(c, url, M_HEAD, NULL, 0, NULL, 0, NULL, NULL, NULL, resp);
+    return do_request(c, url, M_HEAD, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, resp);
 }
 
 s3_status s3_put(s3_client *c, const char *url,
                  const void *data, size_t len,
                  const char *content_type, s3_response *resp) {
     return do_request(c, url, M_PUT, data, len, NULL, 0, content_type, NULL, NULL,
-                      resp);
+                      NULL, resp);
 }
 
 s3_status s3_put_if_match(s3_client *c, const char *url,
@@ -1174,13 +1222,13 @@ s3_status s3_put_if_match(s3_client *c, const char *url,
                           const char *if_match, s3_response *resp) {
     if (!if_match || !if_match[0])
         return do_request(c, url, M_PUT, data, len, NULL, 0,
-                          content_type, NULL, NULL, resp);
+                          content_type, NULL, NULL, NULL, resp);
     char *hv = str_appendf(NULL, "If-Match: %s", if_match);
     if (!hv) return S3_ERR_OOM;
     struct curl_slist *h = curl_slist_append(NULL, hv);
     free(hv);
     s3_status rc = do_request(c, url, M_PUT, data, len, NULL, 0,
-                              content_type, NULL, h, resp);
+                              content_type, NULL, h, NULL, resp);
     curl_slist_free_all(h);
     return rc;
 }
@@ -1198,7 +1246,7 @@ s3_status s3_put_file(s3_client *c, const char *url, const char *path,
     /* Stream from the FILE* in constant memory (do_request rewinds on
        each retry attempt). */
     s3_status rc = do_request(c, url, M_PUT, NULL, 0, f, sz,
-                              content_type, NULL, NULL, resp);
+                              content_type, NULL, NULL, NULL, resp);
     fclose(f);
     return rc;
 }
@@ -1346,7 +1394,7 @@ drain:
 }
 
 s3_status s3_delete(s3_client *c, const char *url, s3_response *resp) {
-    return do_request(c, url, M_DELETE, NULL, 0, NULL, 0, NULL, NULL, NULL, resp);
+    return do_request(c, url, M_DELETE, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, resp);
 }
 
 s3_status s3_copy(s3_client *c, const char *src_url, const char *dst_url,
@@ -1360,7 +1408,7 @@ s3_status s3_copy(s3_client *c, const char *src_url, const char *dst_url,
     s3_url_free(&s);
     struct curl_slist *h = curl_slist_append(NULL, hv);
     free(hv);
-    s3_status rc = do_request(c, dst_url, M_PUT, "", 0, NULL, 0, NULL, NULL, h, resp);
+    s3_status rc = do_request(c, dst_url, M_PUT, "", 0, NULL, 0, NULL, NULL, h, NULL, resp);
     curl_slist_free_all(h);
     return rc;
 }
@@ -1389,7 +1437,7 @@ s3_status s3_multipart_create(s3_client *c, const char *url,
     char *u = str_appendf(NULL, "%s?uploads", url);
     s3_response r = {0};
     s3_status rc = do_request(c, u, M_POST, "", 0, NULL, 0, content_type, NULL, NULL,
-                              &r);
+                              NULL, &r);
     free(u);
     if (rc != S3_OK) { s3_response_free(&r); return rc; }
 
@@ -1431,7 +1479,7 @@ static s3_status mp_put_part(s3_multipart *m, int pn,
                           m->url, pn, m->upload_id);
     s3_response r = {0};
     s3_status rc = do_request(m->client, u, M_PUT, data, len, fp, fp_size,
-                              NULL, NULL, NULL, &r);
+                              NULL, NULL, NULL, NULL, &r);
     free(u);
     if (rc != S3_OK) { s3_response_free(&r); return rc; }
 
@@ -1688,7 +1736,7 @@ s3_status s3_multipart_complete(s3_multipart *m, s3_response *resp) {
 
     char *u = str_appendf(NULL, "%s?uploadId=%s", m->url, m->upload_id);
     s3_status rc = do_request(m->client, u, M_POST, xml, strlen(xml),
-                              NULL, 0, "application/xml", NULL, NULL, resp);
+                              NULL, 0, "application/xml", NULL, NULL, NULL, resp);
     free(u);
     free(xml);
     mp_free(m);
@@ -1700,7 +1748,7 @@ s3_status s3_multipart_abort(s3_multipart *m) {
     char *u = str_appendf(NULL, "%s?uploadId=%s", m->url, m->upload_id);
     s3_response r = {0};
     s3_status rc = do_request(m->client, u, M_DELETE, NULL, 0, NULL, 0, NULL, NULL,
-                              NULL, &r);
+                              NULL, NULL, &r);
     s3_response_free(&r);
     free(u);
     mp_free(m);
@@ -1774,7 +1822,7 @@ s3_status s3_list_ex(s3_client *c, const char *s3_url_prefix,
     s3_url_free(&u);
 
     s3_response r = {0};
-    s3_status rc = do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, &r);
+    s3_status rc = do_request(c, url, M_GET, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, &r);
     free(url);
     if (rc != S3_OK) { s3_response_free(&r); return rc; }
     if (!r.body) { s3_response_free(&r); return S3_ERR_PARSE; }

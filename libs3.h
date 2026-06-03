@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>   /* FILE (s3_get_to_file) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -242,6 +243,11 @@ static inline bool s3_response_not_found(const s3_response *r) {
  * still populates resp.
  */
 s3_status s3_get(s3_client *c, const char *url, s3_response *resp);
+
+/* Like s3_get but streams the body straight to `sink` (a writable FILE*) in
+ * constant memory -- for large objects that shouldn't buffer fully in RAM.
+ * resp->body stays NULL; resp->status and headers are still populated. */
+s3_status s3_get_to_file(s3_client *c, const char *url, FILE *sink, s3_response *resp);
 
 s3_status s3_get_range(s3_client *c, const char *url,
                        uint64_t offset, uint64_t length, s3_response *resp);
