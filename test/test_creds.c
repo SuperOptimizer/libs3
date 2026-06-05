@@ -108,6 +108,9 @@ int main(void) {
     unsetenv("AWS_ACCESS_KEY_ID");
     unsetenv("AWS_SECRET_ACCESS_KEY");
     unsetenv("AWS_DEFAULT_REGION");
+    /* s3_credentials_load caches resolved creds; subtest 3 populated it. The
+       creds were just revoked, so drop the cache to observe the miss. */
+    libs3_test_reset_cred_cache();
     rc = s3_credentials_load(NULL, &cr);
     CHECK(rc == S3_ERR_NO_CREDS);
     s3_credentials_free(&cr);
@@ -135,6 +138,32 @@ int main(void) {
     /* --- 6. ISO8601 parse + bad input ------------------------------- */
     CHECK(parse_iso8601("2026-05-18T18:42:00Z") > 0);
     CHECK(parse_iso8601("garbage") == 0);
+
+    /* --- 7. resolved-credential cache ------------------------------- */
+    /* A fresh resolution is cached and served on the next call even after the
+       underlying source changes; reset forces a re-read. This is what stops a
+       per-request cred provider from popen()ing the `aws` CLI every call. */
+    unlink(creds); unlink(config);
+    libs3_test_reset_cred_cache();
+    setenv("AWS_ACCESS_KEY_ID", "AKIA_CACHE1", 1);
+    setenv("AWS_SECRET_ACCESS_KEY", "secret1", 1);
+    rc = s3_credentials_load(NULL, &cr);
+    CHECK(rc == S3_OK && strcmp(cr.access_key, "AKIA_CACHE1") == 0);
+    s3_credentials_free(&cr);
+    /* mutate the source: a NON-cached load would now see CACHE2; the cache
+       must still return CACHE1. */
+    setenv("AWS_ACCESS_KEY_ID", "AKIA_CACHE2", 1);
+    rc = s3_credentials_load(NULL, &cr);
+    CHECK(rc == S3_OK && strcmp(cr.access_key, "AKIA_CACHE1") == 0);  /* served from cache */
+    s3_credentials_free(&cr);
+    /* reset -> re-resolve -> see the new value */
+    libs3_test_reset_cred_cache();
+    rc = s3_credentials_load(NULL, &cr);
+    CHECK(rc == S3_OK && strcmp(cr.access_key, "AKIA_CACHE2") == 0);  /* fresh */
+    s3_credentials_free(&cr);
+    unsetenv("AWS_ACCESS_KEY_ID");
+    unsetenv("AWS_SECRET_ACCESS_KEY");
+    libs3_test_reset_cred_cache();
 
     /* cleanup temp dir */
     unlink(config);
