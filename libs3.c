@@ -734,8 +734,12 @@ s3_status s3_credentials_from_env(s3_credentials *out) {
     return S3_OK;
 }
 
-/* `aws configure export-credentials [--profile P]` -> JSON on stdout. */
-static bool try_export_creds(const char *profile, s3_credentials *a) {
+/* `aws configure export-credentials [--profile P]` -> JSON on stdout.
+   `expiry_out` (may be NULL) receives the credentials' Expiration as a unix
+   time, or 0 if absent/unparseable (e.g. long-lived static profile creds). */
+static bool try_export_creds_ex(const char *profile, s3_credentials *a,
+                                time_t *expiry_out) {
+    if (expiry_out) *expiry_out = 0;
     char cmd[256];
     if (profile && profile[0])
         snprintf(cmd, sizeof cmd,
@@ -756,7 +760,12 @@ static bool try_export_creds(const char *profile, s3_credentials *a) {
     char *ak = json_string_field((char *)out.data, "AccessKeyId");
     char *sk = json_string_field((char *)out.data, "SecretAccessKey");
     char *tok = json_string_field((char *)out.data, "SessionToken");
+    char *exp = json_string_field((char *)out.data, "Expiration");
     free(out.data);
+    if (exp) {
+        if (expiry_out) *expiry_out = parse_iso8601(exp);
+        free(exp);
+    }
     if (!ak || !sk) { free(ak); free(sk); free(tok); return false; }
     free(a->access_key); free(a->secret_key); free(a->session_token);
     a->access_key = ak;
@@ -850,7 +859,15 @@ static void parse_ini(const char *path, const char *profile,
     fclose(f);
 }
 
-s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
+/* Full resolution chain (export-creds / IMDS / SSO / INI / env). Uncached:
+   every call may popen the `aws` CLI. Wrapped by the caching s3_credentials_load
+   below so per-request callers don't pay a process spawn each time. `expiry_out`
+   (may be NULL) receives the resolved creds' expiry as a unix time, or 0 if the
+   source has no expiry (static keys). */
+static s3_status s3_credentials_load_uncached(const char *profile,
+                                              s3_credentials *out,
+                                              time_t *expiry_out) {
+    if (expiry_out) *expiry_out = 0;
     if (!out) return S3_ERR_INVALID_ARG;
     memset(out, 0, sizeof *out);
     out->access_key = xstrdup("");
@@ -864,9 +881,9 @@ s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
 
     /* 1. explicit profile (env or arg) */
     if (env_profile && env_profile[0])
-        got = try_export_creds(env_profile, out);
+        got = try_export_creds_ex(env_profile, out, expiry_out);
     else if (strcmp(eff_profile, "default") != 0)
-        got = try_export_creds(eff_profile, out);
+        got = try_export_creds_ex(eff_profile, out, expiry_out);
 
     /* 2. EC2 instance role via cached IMDSv2 */
     if (!got) {
@@ -883,7 +900,7 @@ s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
         char **profs = NULL; size_t np = 0;
         find_sso_profiles(&profs, &np);
         for (size_t i = 0; i < np && !got; i++)
-            got = try_export_creds(profs[i], out);
+            got = try_export_creds_ex(profs[i], out, expiry_out);
         for (size_t i = 0; i < np; i++) free(profs[i]);
         free(profs);
     }
@@ -892,7 +909,7 @@ s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
        `got`; the INI/env fallbacks below test out->access_key directly,
        so we deliberately don't re-store the result. */
     if (!got)
-        (void)try_export_creds("", out);
+        (void)try_export_creds_ex("", out, expiry_out);
 
     /* 5. INI files */
     {
@@ -939,6 +956,74 @@ s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
         set_error("credential resolution found no usable AWS keys");
         return S3_ERR_NO_CREDS;
     }
+    return S3_OK;
+}
+
+/* Process-global single-entry cache for resolved credentials, keyed by the
+   effective profile string. Without this, per-request cred providers (e.g. a
+   long-lived S3 streaming session that resolves creds before every signed GET)
+   re-run the full chain each call -- which popen()s the `aws` CLI, paying a
+   Python interpreter startup per request. Measured: a VC3D navigation session
+   spawned `aws` 452 times (~56% of CPU). STS creds last ~1h, so caching until
+   ~5 min before expiry (or a conservative TTL when expiry is unknown) collapses
+   that to one spawn. Guarded by g_cred_mtx (shared with the IMDS cache). */
+static char           *g_load_cache_profile;   /* owned; NULL == empty */
+static s3_credentials  g_load_cache_creds;
+static time_t          g_load_cache_expiry;    /* unix time; hard expiry */
+static bool            g_load_cache_valid;
+
+/* Clear the resolved-credential cache so tests (and callers that just rotated
+   creds and need them honored immediately) can force a fresh resolution. */
+void libs3_test_reset_cred_cache(void) {
+    pthread_mutex_lock(&g_cred_mtx);
+    s3_credentials_free(&g_load_cache_creds);
+    free(g_load_cache_profile);
+    g_load_cache_profile = NULL;
+    g_load_cache_expiry = 0;
+    g_load_cache_valid = false;
+    pthread_mutex_unlock(&g_cred_mtx);
+}
+
+/* When the source reports no expiry (static keys), re-resolve this often so
+   edited ~/.aws files or rotated env vars are eventually picked up. */
+#define LIBS3_CRED_CACHE_TTL_S 600
+
+s3_status s3_credentials_load(const char *profile, s3_credentials *out) {
+    if (!out) return S3_ERR_INVALID_ARG;
+    const char *env_profile = getenv("AWS_PROFILE");
+    const char *eff_profile = (env_profile && env_profile[0]) ? env_profile
+                            : (profile && profile[0]) ? profile : "default";
+
+    pthread_mutex_lock(&g_cred_mtx);
+    time_t now = time(NULL);
+    if (g_load_cache_valid && g_load_cache_profile &&
+        strcmp(g_load_cache_profile, eff_profile) == 0 &&
+        now + 300 < g_load_cache_expiry) {
+        dup_creds(out, &g_load_cache_creds);
+        pthread_mutex_unlock(&g_cred_mtx);
+        return S3_OK;
+    }
+    pthread_mutex_unlock(&g_cred_mtx);
+
+    /* Resolve outside the lock (popen / network can be slow). */
+    s3_credentials fresh = {0};
+    time_t exp = 0;
+    s3_status st = s3_credentials_load_uncached(eff_profile, &fresh, &exp);
+    if (st != S3_OK) { s3_credentials_free(&fresh); return st; }
+
+    /* No reported expiry (static keys) -> cap with a conservative TTL so config
+       edits are eventually honored. Reported expiry is used as-is. */
+    time_t hard_expiry = exp ? exp : now + LIBS3_CRED_CACHE_TTL_S;
+
+    pthread_mutex_lock(&g_cred_mtx);
+    s3_credentials_free(&g_load_cache_creds);
+    g_load_cache_creds = fresh;          /* move */
+    g_load_cache_expiry = hard_expiry;
+    free(g_load_cache_profile);
+    g_load_cache_profile = xstrdup(eff_profile);
+    g_load_cache_valid = true;
+    dup_creds(out, &g_load_cache_creds);
+    pthread_mutex_unlock(&g_cred_mtx);
     return S3_OK;
 }
 
