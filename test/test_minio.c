@@ -279,6 +279,106 @@ int main(void) {
     s3_response_free(&r);
     s3_client_free(pc);
 
+    /* Async batch + caller-buffer destinations: PUT a 1 MiB object, read
+       it back as 16 x 64 KiB via (a) blocking get_batch with dst (also
+       exercises the coalescing split-into-dst path: ranges are adjacent),
+       (b) async submit/poll/take with dst, (c) async with cancellation,
+       (d) s3_get_range_into. */
+    {
+        enum { ASZ = 1 << 20, NR = 16, PSZ = ASZ / NR };
+        uint8_t *obj = malloc(ASZ), *got = malloc(ASZ);
+        for (size_t i = 0; i < ASZ; i++) obj[i] = (uint8_t)(i * 2654435761u >> 13);
+        rc = s3_put(c, BUCKET "async.bin", obj, ASZ,
+                    "application/octet-stream", &r);
+        CHECK(rc == S3_OK && s3_response_ok(&r));
+        s3_response_free(&r);
+
+        s3_range_req rq[NR];
+        s3_response  outs[NR];
+
+        /* (a) blocking, coalesced, into caller memory */
+        memset(got, 0, ASZ);
+        for (int i = 0; i < NR; i++) {
+            rq[i] = (s3_range_req){ .url = BUCKET "async.bin",
+                                    .offset = (uint64_t)i * PSZ,
+                                    .length = PSZ, .dst = got + i * PSZ };
+            memset(&outs[i], 0, sizeof outs[i]);
+        }
+        rc = s3_get_batch(c, rq, NR, 0, outs);
+        CHECK(rc == S3_OK);
+        for (int i = 0; i < NR; i++) {
+            CHECK(outs[i].status == 206 || outs[i].status == 200);
+            CHECK(outs[i].body == NULL && outs[i].body_len == PSZ);
+            s3_response_free(&outs[i]);
+        }
+        printf("BATCH dst+coalesce bytes %s\n",
+               memcmp(got, obj, ASZ) ? "MISMATCH" : "OK");
+        CHECK(memcmp(got, obj, ASZ) == 0);
+
+        /* (b) async: submit, poll until done, take, verify */
+        memset(got, 0, ASZ);
+        s3_batch *b = NULL;
+        rc = s3_batch_submit(c, rq, NR, 8, &b);
+        CHECK(rc == S3_OK && b);
+        int polls = 0, done = 0;
+        while ((done = s3_batch_poll(b, 5)) < NR && polls < 10000) polls++;
+        CHECK(done == NR);
+        for (int i = 0; i < NR; i++) {
+            CHECK(s3_batch_ready(b, i));
+            s3_response br;
+            CHECK(s3_batch_take(b, i, &br) == S3_OK);
+            CHECK((br.status == 206 || br.status == 200) &&
+                  br.body == NULL && br.body_len == PSZ);
+            s3_response_free(&br);
+            /* double take must fail */
+            CHECK(s3_batch_take(b, i, &br) == S3_ERR_INVALID_ARG);
+        }
+        s3_batch_free(b);
+        printf("ASYNC batch (%d polls) bytes %s\n", polls,
+               memcmp(got, obj, ASZ) ? "MISMATCH" : "OK");
+        CHECK(memcmp(got, obj, ASZ) == 0);
+
+        /* (c) async with cancellation: cancel the odd requests */
+        memset(got, 0, ASZ);
+        b = NULL;
+        rc = s3_batch_submit(c, rq, NR, 2, &b);   /* low conc: some pending */
+        CHECK(rc == S3_OK && b);
+        for (int i = 1; i < NR; i += 2) s3_batch_cancel(b, i);
+        CHECK(s3_batch_wait(b) == S3_OK);
+        int got_even = 0;
+        for (int i = 0; i < NR; i++) {
+            s3_response br;
+            s3_status ts = s3_batch_take(b, i, &br);
+            if (i % 2 == 1) {
+                /* cancelled OR finished before cancel landed */
+                CHECK(ts == S3_ERR_ABORTED || ts == S3_OK);
+                if (ts == S3_OK) s3_response_free(&br);
+            } else {
+                CHECK(ts == S3_OK && br.body_len == PSZ);
+                CHECK(memcmp(got + i * PSZ, obj + i * PSZ, PSZ) == 0);
+                got_even++;
+                s3_response_free(&br);
+            }
+        }
+        CHECK(got_even == NR / 2);
+        s3_batch_free(b);
+        printf("ASYNC cancel: even halves OK\n");
+
+        /* (d) zero-alloc single ranged GET */
+        memset(got, 0, ASZ);
+        rc = s3_get_range_into(c, BUCKET "async.bin", 12345, 4096, got, &r);
+        CHECK(rc == S3_OK && (r.status == 206 || r.status == 200));
+        CHECK(r.body == NULL && r.body_len == 4096);
+        CHECK(memcmp(got, obj + 12345, 4096) == 0);
+        s3_response_free(&r);
+        printf("RANGE_INTO bytes OK\n");
+
+        rc = s3_delete(c, BUCKET "async.bin", &r);
+        CHECK(rc == S3_OK && s3_response_ok(&r));
+        s3_response_free(&r);
+        free(obj); free(got);
+    }
+
     /* DELETE everything we created */
     const char *keys[] = { KEY_OBJ, KEY_FILE, KEY_COPY, KEY_MP };
     for (size_t i = 0; i < 4; i++) {

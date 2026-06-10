@@ -104,6 +104,32 @@ int main(void){
             if(!ok) return 1;
         }
     }
+    // F: async batch, scatter into one buffer via req.dst, frame-style
+    // 5ms polls; connections come from the thread share (warmed above).
+    for(int round=0;round<2;++round){
+        uint8_t *fb=malloc(N*RSZ);
+        s3_range_req frq[N];
+        for(int i=0;i<N;++i)
+            frq[i]=(s3_range_req){.url=URL,.offset=(uint64_t)i*RSZ,.length=RSZ,.dst=fb+(size_t)i*RSZ};
+        t0=now();
+        s3_batch *b=NULL;
+        if(s3_batch_submit(cl,frq,N,16,&b)!=S3_OK){ fprintf(stderr,"F submit failed: %s\n",s3_client_last_error(cl)); return 1; }
+        int polls=0;
+        while(s3_batch_poll(b,5)<N) polls++;
+        double tf=now()-t0;
+        int ok=1;
+        for(int i=0;i<N;++i){
+            s3_response br;
+            if(s3_batch_take(b,i,&br)!=S3_OK||br.body_len!=RSZ){ ok=0; break; }
+            s3_response_free(&br);
+        }
+        if(ok) ok=!memcmp(fb,big.body,N*RSZ);
+        s3_batch_free(b);
+        printf("F async     #%d: %d x 64KB in %6.0f ms (%5.1f ms/req-equiv, %d polls) %s\n",
+               round+1,N,tf*1e3,tf*1e3/N,polls,ok?"BYTES-OK":"BYTES-MISMATCH");
+        free(fb);
+        if(!ok) return 1;
+    }
     s3_response_free(&big);
     s3_client_free(cl);
     s3_client_free(cl2);

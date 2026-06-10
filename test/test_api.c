@@ -86,6 +86,41 @@ int main(void) {
     CHECK(s3_get_batch(c, NULL, 1, 0, &r) == S3_ERR_INVALID_ARG);
     CHECK(s3_get_batch(c, NULL, 0, 0, NULL) == S3_OK);   /* n==0 no-op */
 
+    /* dst requires a known length */
+    {
+        uint8_t buf[8];
+        s3_range_req bad = { "s3://b/k", 0, 0, buf };
+        s3_response br = {0};
+        CHECK(s3_get_batch(c, &bad, 1, 0, &br) == S3_ERR_INVALID_ARG);
+        CHECK(s3_get_range_into(c, "s3://b/k", 0, 4, NULL, &br)
+              == S3_ERR_INVALID_ARG);
+        CHECK(s3_get_range_into(c, "s3://b/k", 0, 0, buf, &br) == S3_OK);
+        CHECK(br.body_len == 0);
+    }
+
+    /* async batch argument validation */
+    {
+        s3_batch *b = (s3_batch *)0x1;
+        s3_range_req rq = { "s3://b/k", 0, 4, NULL };
+        CHECK(s3_batch_submit(NULL, &rq, 1, 0, &b) == S3_ERR_INVALID_ARG);
+        CHECK(b == NULL);
+        CHECK(s3_batch_submit(c, NULL, 1, 0, &b) == S3_ERR_INVALID_ARG);
+        CHECK(s3_batch_submit(c, &rq, 0, 0, &b) == S3_ERR_INVALID_ARG);
+        CHECK(s3_batch_submit(c, &rq, 1, 0, NULL) == S3_ERR_INVALID_ARG);
+        uint8_t buf[8];
+        s3_range_req bad = { "s3://b/k", 0, 0, buf };
+        CHECK(s3_batch_submit(c, &bad, 1, 0, &b) == S3_ERR_INVALID_ARG);
+        s3_range_req nourl = { NULL, 0, 4, NULL };
+        CHECK(s3_batch_submit(c, &nourl, 1, 0, &b) == S3_ERR_INVALID_ARG);
+        CHECK(s3_batch_poll(NULL, 0) == -1);
+        CHECK(!s3_batch_ready(NULL, 0));
+        s3_response br;
+        CHECK(s3_batch_take(NULL, 0, &br) == S3_ERR_INVALID_ARG);
+        s3_batch_cancel(NULL, 0);            /* NULL-safe */
+        CHECK(s3_batch_wait(NULL) == S3_ERR_INVALID_ARG);
+        s3_batch_free(NULL);                 /* NULL-safe */
+    }
+
     CHECK(s3_put_file(c, "s3://b/k", NULL, NULL, &r) == S3_ERR_INVALID_ARG);
     CHECK(s3_put_file(c, "s3://b/k", "/no/such/file/here", NULL, &r)
           == S3_ERR_IO);
@@ -154,7 +189,7 @@ int main(void) {
         CHECK(rc == S3_ERR_NO_CREDS);
         s3_response_free(&r);
         /* batch path also propagates a failing provider */
-        s3_range_req rq = { "s3://b/k", 0, 0 };
+        s3_range_req rq = { "s3://b/k", 0, 0, 0 };
         s3_response br = {0};
         rc = s3_get_batch(pcl, &rq, 1, 1, &br);
         CHECK(rc == S3_ERR_NO_CREDS);

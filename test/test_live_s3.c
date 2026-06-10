@@ -76,9 +76,9 @@ int main(void) {
 
     /* Batched ranged GET: 3 objects concurrently, mixed full + ranged. */
     s3_range_req rq[3] = {
-        { VOLBASE ".zgroup",       0, 0  },   /* whole object */
-        { VOLBASE ".zattrs",       0, 32 },   /* ranged */
-        { VOLBASE "metadata.json", 0, 0  },
+        { VOLBASE ".zgroup",       0, 0, 0  },   /* whole object */
+        { VOLBASE ".zattrs",       0, 32, 0 },   /* ranged */
+        { VOLBASE "metadata.json", 0, 0, 0  },
     };
     s3_response br[3] = {0};
     rc = s3_get_batch(c, rq, 3, 3, br);
@@ -96,8 +96,8 @@ int main(void) {
        rc maps to S3_ERR_HTTP and the bad slot carries a 404 while the
        good slot still succeeds (per-object error reporting). */
     s3_range_req rqm[2] = {
-        { VOLBASE ".zgroup",            0, 0 },
-        { VOLBASE "nope-does-not.exist", 0, 0 },
+        { VOLBASE ".zgroup",            0, 0, 0 },
+        { VOLBASE "nope-does-not.exist", 0, 0, 0 },
     };
     s3_response bm[2] = {0};
     rc = s3_get_batch(c, rqm, 2, 2, bm);

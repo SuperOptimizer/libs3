@@ -81,7 +81,7 @@ static void *worker(void *arg) {
             char k2[64];
             snprintf(k2, sizeof k2, BUCKET "obj-%d.bin",
                      (o + 1) % NOBJS);
-            s3_range_req rq[2] = { { key, 0, 32 }, { k2, 0, 0 } };
+            s3_range_req rq[2] = { { key, 0, 32, 0 }, { k2, 0, 0, 0 } };
             s3_response br[2] = {0};
             rc = s3_get_batch(g_client, rq, 2, 2, br);
             (void)rc;

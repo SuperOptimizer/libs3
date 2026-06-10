@@ -18,6 +18,14 @@ parsed by tiny internal scrapers — no extra libraries.
   `s3_prewarm` opens the pool's connections up front; `s3_get_parallel`
   scatters a sharded download straight into one buffer (zero-copy
   reassembly)
+- Async batched `GET` (`s3_batch_submit` / `poll` / `ready` / `take` /
+  `cancel` / `wait`) for frame-budgeted render loops: pump I/O for a few
+  ms per frame, harvest what finished, cancel ranges that scrolled out of
+  view; in-flight cancellation actually drops the transfer
+- Caller-owned destination buffers: `s3_range_req.dst` and
+  `s3_get_range_into` write bodies straight into your memory (cache
+  arenas, pinned ML batches) -- zero allocations, bounded writes (a
+  Range-ignoring server cannot overrun the buffer)
 - Multipart upload (`create` / `upload_part` / streamed `upload_part_file`
   / `complete` / `abort`); parts stream from disk in constant memory
 - `ListObjectsV2` with delimiter, `max-keys`, `start-after`, and
