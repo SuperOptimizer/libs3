@@ -1988,8 +1988,11 @@ s3_status s3_multipart_upload_parts_parallel(s3_multipart *m,
     mp_slot *slots = calloc(n, sizeof *slots);
     if (!slots) return S3_ERR_OOM;
 
-    CURLM *multi = curl_multi_init();
-    if (!multi) { free(slots); return S3_ERR_OOM; }
+    /* same persistent per-thread multi as s3_get_batch: connections + TLS
+     * sessions survive across part batches */
+    batch_tls_t *bt = thread_batch();
+    if (!bt) { free(slots); return S3_ERR_CURL; }
+    CURLM *multi = bt->multi;
     curl_multi_setopt(multi, CURLMOPT_MAX_TOTAL_CONNECTIONS,
                       (long)max_concurrency);
 
@@ -2002,7 +2005,7 @@ s3_status s3_multipart_upload_parts_parallel(s3_multipart *m,
             const s3_part_src *p = &parts[added];
             s->part_number = p->part_number;
 
-            s->eh = curl_easy_init();
+            s->eh = batch_easy_acquire(bt);
             if (!s->eh) { final = S3_ERR_CURL; goto drain; }
 
             char *base = str_appendf(NULL,
@@ -2100,7 +2103,7 @@ s3_status s3_multipart_upload_parts_parallel(s3_multipart *m,
                 final = S3_ERR_CURL;
             }
             curl_multi_remove_handle(multi, s->eh);
-            curl_easy_cleanup(s->eh);
+            batch_easy_release(bt, s->eh);
             s->eh = NULL;
             s->in_flight = false;
             if (s->fp) { fclose(s->fp); s->fp = NULL; }
@@ -2113,14 +2116,14 @@ drain:
     for (size_t i = 0; i < n; i++) {
         mp_slot *s = &slots[i];
         if (s->in_flight && s->eh) curl_multi_remove_handle(multi, s->eh);
-        if (s->eh) curl_easy_cleanup(s->eh);
+        batch_easy_release(bt, s->eh);
         if (s->hdrs) curl_slist_free_all(s->hdrs);
         s3_credentials_free(&s->cr);
         s3_response_free(&s->resp);
         if (s->fp) fclose(s->fp);
         free(s->url);
     }
-    curl_multi_cleanup(multi);
+    /* multi + easy pool persist in thread-local state (connection cache) */
     free(slots);
     return final;
 }
