@@ -488,6 +488,7 @@ struct s3_client {
     long  transfer_timeout_s;
     int   max_retries;
     bool  follow_redirects;
+    int64_t coalesce_gap;      /* batch GET merge threshold; <0 disables */
 };
 
 static void dup_creds(s3_credentials *dst, const s3_credentials *src) {
@@ -525,6 +526,8 @@ s3_client *s3_client_new(const s3_config *cfg) {
     c->transfer_timeout_s = cfg && cfg->transfer_timeout_s ? cfg->transfer_timeout_s : 30;
     c->max_retries        = cfg ? cfg->max_retries : 3;
     c->follow_redirects   = cfg ? cfg->follow_redirects : true;
+    c->coalesce_gap       = cfg && cfg->coalesce_gap ? cfg->coalesce_gap
+                                                     : 256 * 1024;
     return c;
 }
 
@@ -1160,8 +1163,8 @@ static void apply_auth(s3_client *c, CURL *curl, const s3_credentials *cr,
         *hdrs = curl_slist_append(*hdrs, h);
         free(h);
     } else if (c->basic_user && c->basic_user[0]) {
-        sprintf(userpwd_buf, "%s:%s", c->basic_user,
-                c->basic_pass ? c->basic_pass : "");
+        snprintf(userpwd_buf, userpwd_len, "%s:%s", c->basic_user,
+                 c->basic_pass ? c->basic_pass : "");
         curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
         curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd_buf);
     }
@@ -1603,11 +1606,157 @@ drain:
     return final;
 }
 
+/* ---- range coalescing -------------------------------------------- */
+/* Adjacent/near-adjacent ranges on the same URL become one transfer;
+ * the merged body is split back so every caller slot is filled as if it
+ * had been fetched alone. One extra memcpy per coalesced member vs one
+ * saved round-trip per merged request — at object-store latencies the
+ * round-trip wins by orders of magnitude. */
+
+#define COALESCE_SPAN_MAX (32ull << 20)   /* merged transfer size cap */
+
+typedef struct {
+    const char *url;
+    uint64_t    off, len;
+    size_t      orig;        /* index into caller arrays */
+} co_req;
+
+static int co_cmp(const void *pa, const void *pb) {
+    const co_req *a = pa, *b = pb;
+    int u = strcmp(a->url, b->url);
+    if (u) return u;
+    if (a->off != b->off) return a->off < b->off ? -1 : 1;
+    return a->len < b->len ? -1 : (a->len > b->len ? 1 : 0);
+}
+
+static char *co_strdup(const char *s) { return s ? strdup(s) : NULL; }
+
 s3_status s3_get_batch(s3_client *c,
                        const s3_range_req *reqs, size_t n,
                        size_t max_concurrency,
                        s3_response *out) {
-    return get_batch_core(c, reqs, n, max_concurrency, out, NULL);
+    if (!c || (!reqs && n) || (!out && n)) return S3_ERR_INVALID_ARG;
+    if (n < 2 || c->coalesce_gap < 0)
+        return get_batch_core(c, reqs, n, max_concurrency, out, NULL);
+    for (size_t i = 0; i < n; i++)
+        if (!reqs[i].url) return S3_ERR_INVALID_ARG;
+    const uint64_t gap = (uint64_t)c->coalesce_gap;
+
+    co_req *cr = malloc(n * sizeof *cr);
+    if (!cr) return S3_ERR_OOM;
+    for (size_t i = 0; i < n; i++)
+        cr[i] = (co_req){ reqs[i].url, reqs[i].offset, reqs[i].length, i };
+    qsort(cr, n, sizeof *cr, co_cmp);
+
+    /* group[i] = first sorted index of the merged run containing cr[i] */
+    size_t *gfirst = malloc(n * sizeof *gfirst);
+    if (!gfirst) { free(cr); return S3_ERR_OOM; }
+    size_t ngroups = 0, run = 0;
+    uint64_t run_end = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool fresh = (i == 0);
+        if (!fresh) {
+            /* whole-object reqs (len==0) never merge */
+            fresh = cr[i].len == 0 || cr[run].len == 0 ||
+                    strcmp(cr[i].url, cr[run].url) != 0 ||
+                    cr[i].off > run_end + gap ||
+                    (cr[i].off + cr[i].len > cr[run].off + COALESCE_SPAN_MAX);
+        }
+        if (fresh) { run = i; run_end = cr[i].off + cr[i].len; ngroups++; }
+        else if (cr[i].off + cr[i].len > run_end)
+            run_end = cr[i].off + cr[i].len;
+        gfirst[i] = run;
+    }
+
+    if (ngroups == n) {           /* nothing merged: zero-overhead path */
+        free(cr); free(gfirst);
+        return get_batch_core(c, reqs, n, max_concurrency, out, NULL);
+    }
+
+    s3_range_req *mreq = calloc(ngroups, sizeof *mreq);
+    s3_response  *mout = calloc(ngroups, sizeof *mout);
+    size_t *gid = malloc(n * sizeof *gid);   /* sorted idx -> merged idx */
+    if (!mreq || !mout || !gid) {
+        free(cr); free(gfirst); free(mreq); free(mout); free(gid);
+        return S3_ERR_OOM;
+    }
+    size_t g = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (gfirst[i] == i) {
+            uint64_t end = cr[i].off + cr[i].len;
+            for (size_t j = i + 1; j < n && gfirst[j] == i; j++)
+                if (cr[j].off + cr[j].len > end) end = cr[j].off + cr[j].len;
+            mreq[g].url    = cr[i].url;
+            mreq[g].offset = cr[i].off;
+            mreq[g].length = cr[i].len ? end - cr[i].off : 0;
+            g++;
+        }
+        gid[i] = g - 1;
+    }
+
+    s3_status final = get_batch_core(c, mreq, ngroups, max_concurrency,
+                                     mout, NULL);
+    if (s3_global_is_aborted()) goto done;
+
+    for (size_t i = 0; i < n; i++) memset(&out[i], 0, sizeof out[i]);
+    for (size_t i = 0; i < n; i++) {
+        s3_response *m = &mout[gid[i]];
+        const s3_range_req *mr = &mreq[gid[i]];
+        /* sole member: hand the merged response over verbatim */
+        if (cr[i].off == mr->offset && cr[i].len == mr->length &&
+            (i + 1 == n || gfirst[i + 1] != gfirst[i]) && gfirst[i] == i) {
+            out[cr[i].orig] = *m;
+            memset(m, 0, sizeof *m);
+            continue;
+        }
+        s3_response *o = &out[cr[i].orig];
+        o->status = m->status;
+        /* 206 bodies start at the merged offset; a Range-ignoring 200
+         * returns the whole object, so member data sits at its absolute
+         * offset */
+        uint64_t base;
+        if (m->status == 206)      base = mr->offset;
+        else if (m->status == 200) base = 0;
+        else continue;                       /* error status, no body split */
+        uint64_t rel = cr[i].off - base;
+        if (!m->body || rel + cr[i].len > m->body_len) {
+            o->status = m->status == 206 || m->status == 200 ? 0 : m->status;
+            final = final == S3_OK ? S3_ERR_HTTP : final;
+            continue;
+        }
+        o->body = malloc(cr[i].len ? cr[i].len : 1);
+        if (!o->body) { final = S3_ERR_OOM; continue; }
+        memcpy(o->body, m->body + rel, cr[i].len);
+        o->body_len       = cr[i].len;
+        o->content_length = cr[i].len;
+        o->content_type   = co_strdup(m->content_type);
+        o->etag           = co_strdup(m->etag);
+        o->last_modified  = co_strdup(m->last_modified);
+    }
+
+done:
+    for (size_t k = 0; k < ngroups; k++) s3_response_free(&mout[k]);
+    free(cr); free(gfirst); free(gid); free(mreq); free(mout);
+    return s3_global_is_aborted() ? S3_ERR_ABORTED : final;
+}
+
+s3_status s3_prewarm(s3_client *c, const char *url, size_t nconn) {
+    if (!c || !url || nconn == 0) return S3_ERR_INVALID_ARG;
+    if (nconn > BATCH_POOL_MAX) nconn = BATCH_POOL_MAX;
+    s3_range_req *reqs = calloc(nconn, sizeof *reqs);
+    s3_response  *outs = calloc(nconn, sizeof *outs);
+    if (!reqs || !outs) { free(reqs); free(outs); return S3_ERR_OOM; }
+    for (size_t i = 0; i < nconn; i++)
+        reqs[i] = (s3_range_req){ .url = url, .offset = 0, .length = 1 };
+    /* bypass coalescing on purpose: each 1-byte GET opens one connection */
+    s3_status rc = get_batch_core(c, reqs, nconn, nconn, outs, NULL);
+    for (size_t i = 0; i < nconn; i++) {
+        if (rc == S3_OK && !s3_response_ok(&outs[i]) && outs[i].status != 206)
+            rc = S3_ERR_HTTP;
+        s3_response_free(&outs[i]);
+    }
+    free(reqs); free(outs);
+    return rc;
 }
 
 s3_status s3_get_parallel(s3_client *c, const char *url,
@@ -1656,16 +1805,13 @@ s3_status s3_get_parallel(s3_client *c, const char *url,
     free(dsts);
 
     s3_status final = rc;
-    uint64_t got = 0;
     int ok = (rc == S3_OK);
     for (size_t i = 0; i < nparts && ok; i++) {
-        uint64_t pl = reqs[i].length;
         if ((outs[i].status != 206 && outs[i].status != 200) ||
-            outs[i].body_len != pl) {
+            outs[i].body_len != reqs[i].length) {
             ok = 0; final = S3_ERR_HTTP; resp->status = outs[i].status;
             break;
         }
-        got += pl;
     }
     for (size_t i = 0; i < nparts; i++) s3_response_free(&outs[i]);
     free(reqs); free(outs);

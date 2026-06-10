@@ -92,6 +92,10 @@ add_executable(test_api test/test_api.c)
 target_link_libraries(test_api PRIVATE s3_test)
 add_test(NAME api COMMAND test_api)
 
+# Live-network bench (not a ctest test): build/bench_ranged
+add_executable(bench_ranged test/bench_ranged.c)
+target_link_libraries(bench_ranged PRIVATE s3)
+
 # Mock-IMDS: runs anywhere (local metadata server, no EC2).
 add_executable(test_imds_mock test/test_imds_mock.c)
 target_link_libraries(test_imds_mock PRIVATE s3_test)

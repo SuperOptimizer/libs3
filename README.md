@@ -11,7 +11,13 @@ parsed by tiny internal scrapers — no extra libraries.
   → 304), `HEAD`, `PUT`, streamed `PUT` from file, `DELETE`, server-side
   `COPY`
 - Batched ranged `GET` via `curl_multi` — many chunk fetches concurrently
-  over pooled connections (the hot path for zarr rendering)
+  over per-thread persistent connection pools (TLS handshakes paid once per
+  thread, not per batch; the hot path for zarr rendering). Adjacent/
+  near-adjacent ranges are transparently coalesced into single transfers
+  and split back per request (`s3_config.coalesce_gap`, default 256 KiB).
+  `s3_prewarm` opens the pool's connections up front; `s3_get_parallel`
+  scatters a sharded download straight into one buffer (zero-copy
+  reassembly)
 - Multipart upload (`create` / `upload_part` / streamed `upload_part_file`
   / `complete` / `abort`); parts stream from disk in constant memory
 - `ListObjectsV2` with delimiter, `max-keys`, `start-after`, and

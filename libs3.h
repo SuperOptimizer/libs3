@@ -180,6 +180,14 @@ typedef struct s3_config {
     int   max_retries;                     /* default 3 (5xx/401/403/network) */
     bool  follow_redirects;                /* default true */
     const char *user_agent;                /* default "libs3/1.0" */
+
+    /*
+     * s3_get_batch range coalescing: requests on the same URL whose ranges
+     * are adjacent or separated by at most this many bytes are merged into
+     * one transfer (gap bytes are downloaded and discarded). 0 -> default
+     * (256 KiB); negative -> disabled. Merged spans are capped at 32 MiB.
+     */
+    int64_t coalesce_gap;
 } s3_config;
 
 /* Create a client. Returns NULL on allocation/curl-init failure. */
@@ -323,6 +331,12 @@ s3_status s3_get_conditional(s3_client *c, const char *url,
  * function returns S3_OK if every transfer completed at the transport
  * level; inspect each out[i].status for per-object HTTP results. A length
  * of 0 fetches the whole object.
+ *
+ * Adjacent/near-adjacent ranges on the same URL are coalesced into one
+ * transfer (see s3_config.coalesce_gap) and split back transparently:
+ * every out[i] still gets its own status, body and body_len. Responses
+ * carved from a merged transfer share that transfer's content_type/etag/
+ * last_modified (duplicated; s3_response_free as usual).
  */
 typedef struct s3_range_req {
     const char *url;
@@ -334,6 +348,14 @@ s3_status s3_get_batch(s3_client *c,
                        const s3_range_req *reqs, size_t n,
                        size_t max_concurrency,
                        s3_response *out);
+
+/*
+ * Open `nconn` connections to `url`'s host from the calling thread's batch
+ * pool (tiny 1-byte ranged GETs), so the first real s3_get_batch on this
+ * thread doesn't pay TCP+TLS handshakes. Connections are per-thread; call
+ * it on the thread that will issue the batches.
+ */
+s3_status s3_prewarm(s3_client *c, const char *url, size_t nconn);
 
 /* ------------------------------------------------------------------ */
 /* Multipart upload                                                    */
