@@ -1440,7 +1440,7 @@ s3_status s3_get_batch(s3_client *c,
             s3_status crc = resolve_request_creds(c, &s->cr);
             if (crc != S3_OK) { final = crc; goto drain; }
             apply_auth(c, s->eh, &s->cr, &s->hdrs,
-                       s->sigv4, s->userpwd);
+                       s->sigv4, sizeof s->sigv4, s->userpwd, sizeof s->userpwd);
             if (s->hdrs)
                 curl_easy_setopt(s->eh, CURLOPT_HTTPHEADER, s->hdrs);
 
@@ -1733,7 +1733,7 @@ s3_status s3_multipart_upload_parts_parallel(s3_multipart *m,
             s3_status crc = resolve_request_creds(m->client, &s->cr);
             if (crc != S3_OK) { final = crc; goto drain; }
             apply_auth(m->client, s->eh, &s->cr, &s->hdrs,
-                       s->sigv4, s->userpwd);
+                       s->sigv4, sizeof s->sigv4, s->userpwd, sizeof s->userpwd);
             if (s->hdrs)
                 curl_easy_setopt(s->eh, CURLOPT_HTTPHEADER, s->hdrs);
 
