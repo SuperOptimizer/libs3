@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Hermetic unit tests (network-gated tests self-skip) on Linux + macOS.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+  # Same hermetic suite under ASan+UBSan.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev clang
+      - name: configure
+        run: >
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: build
+        run: cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+  # End-to-end against a real S3 implementation (MinIO in docker):
+  # write paths, multipart (serial + parallel), batch/async GET with
+  # coalescing and caller buffers, concurrency hammer.
+  minio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: configure + build
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: start minio
+        run: sh test/minio-up.sh
+      - name: e2e
+        run: |
+          LIBS3_MINIO=1 ./build/test_minio
+          LIBS3_MINIO=1 ./build/test_concurrency
