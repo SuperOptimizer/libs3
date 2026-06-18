@@ -36,6 +36,35 @@
 #include <sys/resource.h>    /* setrlimit: raise FD cap for high concurrency */
 #endif
 #include <time.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+/* ---- global concurrent-connection cap (env S3_MAX_CONNECTIONS; 0/unset = off) ----
+ * A throttling NAT/firewall/proxy between client and S3 resets new TLS connections
+ * when too many open at once. This caps in-flight S3 requests process-wide (across
+ * all threads AND batches) so we stay under that threshold; excess threads block on
+ * the semaphore instead of opening a connection that would get reset. */
+static int g_conn_cap = -1;                 /* -1 uninit, 0 = unlimited */
+static sem_t g_conn_sem;
+static pthread_once_t g_conn_once = PTHREAD_ONCE_INIT;
+static void conn_cap_init(void){
+    const char *e = getenv("S3_MAX_CONNECTIONS");
+    int v = e ? atoi(e) : 0;
+    if (v > 0) { sem_init(&g_conn_sem, 0, (unsigned)v); g_conn_cap = v; }
+    else g_conn_cap = 0;
+}
+static inline void conn_acquire(void){
+    pthread_once(&g_conn_once, conn_cap_init);
+    if (g_conn_cap > 0) sem_wait(&g_conn_sem);
+}
+static inline void conn_release(void){
+    if (g_conn_cap > 0) sem_post(&g_conn_sem);
+}
+static inline int conn_tryacquire(void){   /* 1 = got a permit (or unlimited), 0 = none free */
+    pthread_once(&g_conn_once, conn_cap_init);
+    if (g_conn_cap <= 0) return 1;
+    return sem_trywait(&g_conn_sem) == 0;
+}
 
 /* ================================================================== */
 /* Small utilities                                                     */
@@ -1332,7 +1361,22 @@ static s3_status do_request(s3_client *c, const char *url, method_t method,
         }
         if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
 
+        conn_acquire();
         CURLcode code = curl_easy_perform(curl);
+        conn_release();
+        if (getenv("S3_TIMING")) {
+            double nl=0,cn=0,ac=0,st=0,tt=0,sp=0; curl_off_t dl=0; long nc=0;
+            curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &nl);
+            curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &cn);
+            curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &ac);
+            curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &st);
+            curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &tt);
+            curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &sp);
+            curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &dl);
+            curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &nc);  /* new conns (0 = reused keep-alive) */
+            fprintf(stderr,"[s3t] rc=%d dns=%.3f conn=%.3f tls=%.3f ttfb=%.3f total=%.3f size=%lld speed=%.0fKB/s newconn=%ld\n",
+                    (int)code,nl,cn,ac,st,tt,(long long)dl,sp/1024.0,nc);
+        }
         free(ct_hdr);
         if (hdrs) curl_slist_free_all(hdrs);
 
@@ -1495,6 +1539,7 @@ typedef struct {
     char               sigv4[128];
     char               userpwd[2048];
     bool               in_flight;
+    bool               has_permit;   /* holds a global connection-cap permit */
 } batch_slot;
 
 /* Start one batch transfer: acquire a pooled handle, configure it for
@@ -1558,6 +1603,7 @@ static s3_status batch_slot_start(s3_client *c, batch_tls_t *bt, CURLM *multi,
         curl_easy_setopt(s->eh, CURLOPT_HTTPHEADER, s->hdrs);
 
     curl_easy_setopt(s->eh, CURLOPT_PRIVATE, s);
+    /* permit already acquired by the prime loop (s->has_permit set there) */
     curl_multi_add_handle(multi, s->eh);
     s->in_flight = true;
     return S3_OK;
@@ -1576,7 +1622,10 @@ static void batch_slot_finish(batch_tls_t *bt, CURLM *multi, batch_slot *s,
             out->body_len = s->body.len;
             s->body.data = NULL;
         }
-        if (!s3_response_ok(out) && out->status != 206 && out->status != 304)
+        /* 404 = absent object: a VALID per-slot outcome for a sparse zarr (caller
+         * checks out[i].status and fills zero). NOT a batch-level error -- otherwise
+         * one absent chunk discards the whole batch and forces a slow serial fallback. */
+        if (!s3_response_ok(out) && out->status != 206 && out->status != 304 && out->status != 404)
             *final = S3_ERR_HTTP;
     } else {
         set_error("batch[%td]: %s", idx, curl_easy_strerror(result));
@@ -1586,6 +1635,7 @@ static void batch_slot_finish(batch_tls_t *bt, CURLM *multi, batch_slot *s,
     batch_easy_release(bt, s->eh);
     s->eh = NULL;
     s->in_flight = false;
+    if (s->has_permit) { conn_release(); s->has_permit = false; }
 }
 
 /* Tear down a slot in any state (pending start failure, in-flight cancel,
@@ -1595,6 +1645,7 @@ static void batch_slot_abort(batch_tls_t *bt, CURLM *multi, batch_slot *s) {
     batch_easy_release(bt, s->eh);
     s->eh = NULL;
     s->in_flight = false;
+    if (s->has_permit) { conn_release(); s->has_permit = false; }
     if (s->hdrs) { curl_slist_free_all(s->hdrs); s->hdrs = NULL; }
     s3_credentials_free(&s->cr);
     free(s->url); s->url = NULL;
@@ -1637,7 +1688,16 @@ static s3_status get_batch_core(s3_client *c,
     while (completed < n && !s3_global_is_aborted()) {
         while (added < n &&
                (added - completed) < max_concurrency) {
+            /* Gate on the global connection cap WITHOUT hold-and-wait: try for a
+             * permit; if none free and we already have transfers in flight, go
+             * perform/complete them (which frees permits) before priming more. Only
+             * block when nothing is in flight (guarantees forward progress, no deadlock). */
+            if (!conn_tryacquire()) {
+                if (added > completed) break;   /* in-flight work exists -> drain it first */
+                conn_acquire();                 /* nothing in flight -> wait for one permit */
+            }
             batch_slot *s = &slots[added];
+            s->has_permit = true;               /* permit held (try/blocking above) */
             uint8_t *dest = dsts ? dsts[added] : reqs[added].dst;
             s3_status src = batch_slot_start(c, bt, multi, s, &reqs[added],
                                              dest, &out[added]);
